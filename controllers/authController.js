@@ -12,7 +12,7 @@ exports.register = async (req, res) => {
     await user.save();
 
     const payload = { user: { id: user.id } };
-    const token = jwt.sign(payload, config.jwtSecret, { expiresIn: '1h' });
+    const token = jwt.sign(payload, config.jwtSecret, { expiresIn: '30d' });
 
     res.json({ token });
   } catch (err) {
