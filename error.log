@@ -1,0 +1,4 @@
+{"level":"error","message":"Preload failed for NSE_INDEX|Nifty Pvt Bank: Request failed with status code 404","timestamp":"2025-08-02T20:20:12.459Z"}
+{"level":"error","message":"Preload failed for NSE_EQ|INE002L01015: Request failed with status code 404","timestamp":"2025-08-02T20:20:12.473Z"}
+{"level":"error","message":"Preload failed for NSE_INDEX|Nifty Rural: Request failed with status code 404","timestamp":"2025-08-02T20:20:12.683Z"}
+{"level":"error","message":"Preload failed for NSE_INDEX|Nifty MNC: Request failed with status code 404","timestamp":"2025-08-02T20:20:12.686Z"}

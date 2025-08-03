@@ -1,3 +1,5 @@
+// C:\Users\deves\Desktop\Upstox API Trials\Backend_Github\models\Watchlist.js
+
 const mongoose = require("mongoose");
 
 const watchlistSchema = new mongoose.Schema({

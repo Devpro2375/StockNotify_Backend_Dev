@@ -8,6 +8,7 @@ const authRoutes = require("./routes/authRoutes");
 const watchlistRoutes = require("./routes/watchlistRoutes");
 const redisService = require("./services/redisService");
 const { fetchLastClose } = require("./services/upstoxService");
+const alertsRoutes = require("./routes/alerts");
 
 const app = express();
 const server = http.createServer(app);
@@ -17,6 +18,7 @@ app.use(express.json());
 
 app.use("/api/auth", authRoutes);
 app.use("/api/watchlist", watchlistRoutes);
+app.use("/api/alerts", alertsRoutes);
 
 mongoose
   .connect(config.mongoURI)
