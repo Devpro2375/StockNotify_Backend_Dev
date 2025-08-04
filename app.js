@@ -6,6 +6,7 @@ const config = require("./config/config");
 const socketService = require("./services/socketService");
 const authRoutes = require("./routes/authRoutes");
 const watchlistRoutes = require("./routes/watchlistRoutes");
+const marketDataRoutes = require("./routes/marketDataRoutes"); // Add this line
 const redisService = require("./services/redisService");
 const { fetchLastClose } = require("./services/upstoxService");
 const alertsRoutes = require("./routes/alerts");
@@ -18,6 +19,7 @@ app.use(express.json());
 
 app.use("/api/auth", authRoutes);
 app.use("/api/watchlist", watchlistRoutes);
+app.use("/api/market-data", marketDataRoutes); // Add this line
 app.use("/api/alerts", alertsRoutes);
 
 mongoose

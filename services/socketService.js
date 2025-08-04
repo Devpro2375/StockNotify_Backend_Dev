@@ -107,6 +107,16 @@ function init(server) {
         if ((await redisService.getStockUserCount(symbol)) === 1) {
           upstoxService.subscribe([symbol]);
           console.log(`🌐 First global subscription to ${symbol}`);
+          // New: Proactively fetch last close if no tick exists
+          if (!(await redisService.getLastTick(symbol))) {
+            const lastClose = await upstoxService.fetchLastClose(symbol);
+            if (lastClose) {
+              // Set as initial tick (simplified)
+              await redisService.setLastTick(symbol, {
+                fullFeed: { marketFF: { ltpc: { ltp: lastClose.close } } },
+              });
+            }
+          }
         }
       }
       socket.join(symbol);

@@ -32,7 +32,7 @@ exports.login = async (req, res) => {
     if (!isMatch) return res.status(400).json({ msg: "Invalid credentials" });
 
     const payload = { user: { id: user.id } };
-    const token = jwt.sign(payload, config.jwtSecret, { expiresIn: "1h" });
+    const token = jwt.sign(payload, config.jwtSecret, { expiresIn: "24h" });
 
     res.json({ token });
   } catch (err) {
