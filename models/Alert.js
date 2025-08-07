@@ -1,5 +1,3 @@
-// C:\Users\deves\Desktop\Upstox API Trials\Backend_Github\models\Alert.js
-
 const mongoose = require("mongoose");
 
 const alertSchema = new mongoose.Schema({

@@ -1,6 +1,6 @@
-// C:\Users\deves\Desktop\Upstox API Trials\Backend_Github\controllers\alertsController.js
-
 const Alert = require("../models/Alert");
+const redisService = require("../services/redisService");
+const upstoxService = require("../services/upstoxService");
 
 // GET /api/alerts
 exports.getAlerts = async (req, res) => {
@@ -79,6 +79,15 @@ exports.addAlert = async (req, res) => {
     });
 
     const alert = await newAlert.save();
+
+    // New: Add to persistent stocks for offline monitoring
+    await redisService.addPersistentStock(instrument_key);
+    const userCount = await redisService.getStockUserCount(instrument_key);
+    if (userCount === 0) {
+      upstoxService.subscribe([instrument_key]);
+      console.log(`🌐 Subscribed to ${instrument_key} for persistent alerts`);
+    }
+
     res.json({ alert });
   } catch (err) {
     console.error("Error in addAlert:", err.message);
@@ -100,6 +109,18 @@ exports.removeAlert = async (req, res) => {
 
     const alert = await Alert.findOneAndDelete(query);
     if (!alert) return res.status(404).json({ msg: "Alert not found" });
+
+    // New: Check if any active alerts remain for this symbol (global, across all users)
+    const symbol = alert.instrument_key; // Use the deleted alert's symbol
+    const remainingAlerts = await Alert.countDocuments({ instrument_key: symbol, status: "active" });
+    if (remainingAlerts === 0) {
+      await redisService.removePersistentStock(symbol);
+      const userCount = await redisService.getStockUserCount(symbol);
+      if (userCount === 0) {
+        upstoxService.unsubscribe([symbol]);
+        console.log(`❎ Unsubscribed from ${symbol} as no active alerts or users remain`);
+      }
+    }
 
     res.json({ msg: "Alert removed", alert });
   } catch (err) {

@@ -12,21 +12,18 @@ exports.getQuotes = async (req, res) => {
     }
 
     const instrumentList = instruments.split(',');
-    const quotes = {};
-
-    // Try to get data from multiple sources
-    for (const instrument of instrumentList) {
+    const quotesPromises = instrumentList.map(async (instrument) => {
       try {
         // First, try to get last tick from Redis (real-time data)
         const lastTick = await redisService.getLastTick(instrument);
-        
+       
         if (lastTick) {
           // Extract price from tick data
-          const price = lastTick?.fullFeed?.marketFF?.ltpc?.ltp || 
-                       lastTick?.fullFeed?.indexFF?.ltpc?.ltp;
+          const price = lastTick?.fullFeed?.marketFF?.ltpc?.ltp ||
+                        lastTick?.fullFeed?.indexFF?.ltpc?.ltp;
           
           if (price) {
-            quotes[instrument] = {
+            return { [instrument]: {
               last_price: price,
               ohlc: {
                 open: lastTick?.fullFeed?.marketFF?.marketOHLC?.ohlc?.open || price,
@@ -35,15 +32,14 @@ exports.getQuotes = async (req, res) => {
                 close: price
               },
               source: 'realtime'
-            };
-            continue;
+            }};
           }
         }
 
         // Fallback to last close price from Redis
         const lastClose = await redisService.getLastClosePrice(instrument);
         if (lastClose) {
-          quotes[instrument] = {
+          return { [instrument]: {
             last_price: lastClose.close,
             ohlc: {
               open: lastClose.open,
@@ -52,8 +48,7 @@ exports.getQuotes = async (req, res) => {
               close: lastClose.close
             },
             source: 'historical'
-          };
-          continue;
+          }};
         }
 
         // Final fallback: Fetch from Upstox API directly
@@ -70,20 +65,23 @@ exports.getQuotes = async (req, res) => {
 
         if (response.data && response.data.data && response.data.data[instrument]) {
           const data = response.data.data[instrument];
-          quotes[instrument] = {
+          return { [instrument]: {
             last_price: data.last_price,
             ohlc: data.ohlc,
             source: 'upstox_api'
-          };
+          }};
         } else {
-          quotes[instrument] = null;
+          return { [instrument]: null };
         }
 
       } catch (error) {
         console.error(`Failed to fetch quote for ${instrument}:`, error.message);
-        quotes[instrument] = null;
+        return { [instrument]: null };
       }
-    }
+    });
+
+    const results = await Promise.all(quotesPromises);
+    const quotes = results.reduce((acc, curr) => ({ ...acc, ...curr }), {});
 
     res.json(quotes);
   } catch (error) {

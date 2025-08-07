@@ -1,5 +1,3 @@
-// C:\Users\deves\Desktop\Upstox API Trials\Backend_Github\routes\alerts.js
-
 const express = require("express");
 const router = express.Router();
 const auth = require("../middlewares/authMiddleware");

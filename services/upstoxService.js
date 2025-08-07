@@ -1,11 +1,11 @@
 const WebSocket = require("ws");
-const https = require("https");
 const axios = require("axios");
 const config = require("../config/config");
 const ioInstance = require("./ioInstance");
 const redisService = require("./redisService");
+const Queue = require('bull');
 
-// Load Protobuf (unchanged from your code)
+// Load Protobuf (unchanged)
 const protoRoot = require("../proto/marketdata.js");
 let FeedResponse;
 try {
@@ -45,34 +45,40 @@ if (!FeedResponse || typeof FeedResponse.decode !== "function") {
 }
 console.log("FeedResponse loaded successfully with decode method.");
 
-let ws = null;
+// Tick queue
+const tickQueue = new Queue('tick-processing', {
+  redis: { host: config.redisHost, port: config.redisPort, password: config.redisPassword }
+});
 
-function getAuthorizedUrl() {
-  return new Promise((resolve, reject) => {
-    https
-      .get(
-        config.upstoxWsAuthUrl,
-        {
-          headers: { Authorization: `Bearer ${config.upstoxAccessToken}` },
-        },
-        (res) => {
-          let data = "";
-          res.on("data", (chunk) => (data += chunk));
-          res.on("end", () => {
-            const json = JSON.parse(data);
-            if (!json.data?.authorized_redirect_uri)
-              return reject(new Error("Invalid Upstox response"));
-            resolve(json.data.authorized_redirect_uri);
-          });
-        }
-      )
-      .on("error", reject);
-  });
+let ws = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 10;
+const BASE_RECONNECT_DELAY = 5000;
+
+async function getAuthorizedUrl() {
+  try {
+    const res = await axios.get(config.upstoxWsAuthUrl, {
+      headers: { Authorization: `Bearer ${config.upstoxAccessToken}` }
+    });
+    if (!res.data?.data?.authorized_redirect_uri) {
+      throw new Error("Invalid Upstox auth response");
+    }
+    console.log("Fetched fresh authorized URL");
+    return res.data.data.authorized_redirect_uri;
+  } catch (err) {
+    console.error("Failed to fetch authorized URL:", err.message);
+    if (err.response?.status === 401) {
+      console.error("Access token expired! Regenerate it.");
+    }
+    throw err;
+  }
 }
 
 async function resubscribeAll() {
   const globalStocks = await redisService.getAllGlobalStocks();
-  if (globalStocks.length) exports.subscribe(globalStocks);
+  const persistentStocks = await redisService.getPersistentStocks();
+  const allStocks = [...new Set([...globalStocks, ...persistentStocks])];
+  if (allStocks.length) exports.subscribe(allStocks);
 }
 
 async function fetchLastClose(instrumentKey) {
@@ -86,7 +92,10 @@ async function fetchLastClose(instrumentKey) {
       }
     );
     const candles = res.data.data.candles;
-    if (!candles.length) return null;
+    if (!candles.length) {
+      console.warn(`No historical data for ${instrumentKey} on ${today}`);
+      return null;
+    }
     const last = candles[candles.length - 1];
     const payload = {
       timestamp: last[0],
@@ -99,22 +108,35 @@ async function fetchLastClose(instrumentKey) {
     await redisService.setLastClosePrice(instrumentKey, payload);
     return payload;
   } catch (err) {
-    console
-      .error
-      // `Error fetching historical for ${instrumentKey}:`,
-      // err.message
-      ();
+    console.error(`Error fetching historical for ${instrumentKey}:`, err.message);
+    if (err.response?.status === 404) {
+      console.warn("Symbol may be invalid or no data available. Skipping.");
+    } else if (err.response?.status === 401) {
+      console.error("Access token invalid/expired. Regenerate.");
+    }
     return null;
   }
 }
 
-async function connect(retryCount = 0) {
+async function connect() {
+  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    console.error("Max reconnect attempts reached. Manual intervention needed.");
+    return;
+  }
+
   try {
     const url = await getAuthorizedUrl();
+    if (ws && ws.readyState !== WebSocket.CLOSED) {
+      console.log("Closing existing WebSocket.");
+      ws.close(1000, "Reconnecting");
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+
     ws = new WebSocket(url, { followRedirects: true });
 
     ws.on("open", () => {
       console.log("Connected to Upstox WS");
+      reconnectAttempts = 0;
       resubscribeAll();
     });
 
@@ -131,21 +153,40 @@ async function connect(retryCount = 0) {
         for (let symbol of Object.keys(decoded?.feeds || {})) {
           const tick = decoded.feeds[symbol];
           await redisService.setLastTick(symbol, tick);
+        await tickQueue.add({ symbol, tick }, {
+        removeOnComplete: { age: 30, count: 1000 }, // Remove completed after 30s or 1000 jobs
+        removeOnFail: { age: 60, count: 500 } // Remove failed after 60s or 500 jobs
+                   });
           io.in(symbol).emit("tick", { symbol, tick });
         }
       } catch (decodeErr) {
         console.error("Failed to decode WS message:", decodeErr);
+        if (decodeErr.message.includes('OOM')) {
+          await redisService.cleanupStaleStocks(); // Emergency cleanup
+        }
       }
     });
 
-    ws.on("close", () => setTimeout(() => connect(0), 5000));
+    ws.on("close", (code, reason) => {
+      console.log(`WS closed: Code ${code}, Reason: ${reason}`);
+      reconnectAttempts++;
+      const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
+      console.log(`Reconnecting in ${delay / 1000} seconds (Attempt ${reconnectAttempts})...`);
+      setTimeout(connect, delay);
+    });
+
     ws.on("error", (err) => {
-      console.error("WS error:", err);
-      ws.close();
+      console.error("WS error:", err.message);
+      if (err.message.includes("403")) {
+        console.error("403 Forbidden: Check for multiple connections or stale sessions. Fetching fresh URL.");
+      }
+      if (ws) ws.close();
     });
   } catch (err) {
-    if (retryCount < 5) setTimeout(() => connect(retryCount + 1), 5000);
-    else console.error("Max retries reached for Upstox connection");
+    console.error("Connect failed:", err.message);
+    reconnectAttempts++;
+    const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
+    setTimeout(connect, delay);
   }
 }
 
@@ -165,6 +206,4 @@ function sendSubscription(method, symbols) {
 exports.subscribe = (symbols) => sendSubscription("sub", symbols);
 exports.unsubscribe = (symbols) => sendSubscription("unsub", symbols);
 exports.fetchLastClose = fetchLastClose;
-
 exports.connect = connect;
-

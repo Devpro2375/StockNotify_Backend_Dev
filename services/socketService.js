@@ -1,10 +1,8 @@
-// C:\Users\deves\Desktop\Upstox API Trials\Backend_Github\services\socketService.js
-
 const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
 const config = require("../config/config");
 const Watchlist = require("../models/Watchlist");
-const Alert = require("../models/Alert"); // Import Alert model for real-time triggering
+const Alert = require("../models/Alert");
 const redisService = require("./redisService");
 const upstoxService = require("./upstoxService");
 const ioInstance = require("./ioInstance");
@@ -22,8 +20,8 @@ async function checkAlertTriggers(userId, symbol, tick) {
 
     let triggered = false;
     if (alert.trend === "bullish") {
-      if (price >= alert.target_price) triggered = true; // Target hit
-      else if (price <= alert.stop_loss) triggered = true; // SL hit
+      if (price >= alert.target_price) triggered = true;
+      else if (price <= alert.stop_loss) triggered = true;
     } else if (alert.trend === "bearish") {
       if (price <= alert.target_price) triggered = true;
       else if (price >= alert.stop_loss) triggered = true;
@@ -41,8 +39,8 @@ async function checkAlertTriggers(userId, symbol, tick) {
 
 function init(server) {
   const io = new Server(server, { cors: { origin: "*" } });
-  ioInstance.setIo(io); // ✅ Set first
-  upstoxService.connect(); // ✅ Connect after IO is ready
+  ioInstance.setIo(io);
+  upstoxService.connect();
 
   io.use((socket, next) => {
     const token = socket.handshake.auth.token;
@@ -59,11 +57,14 @@ function init(server) {
     console.log(`✅ User connected: ${socket.user.id}`);
     socket.join(`user:${socket.user.id}`);
 
-    const subscribed = new Set(
-      await redisService.getUserStocks(socket.user.id)
-    );
+    const subscribed = new Set(await redisService.getUserStocks(socket.user.id));
 
-    // Subscribe to user's watchlist stocks
+    for (const symbol of subscribed) {
+      socket.join(symbol);
+      const lastTick = await redisService.getLastTick(symbol);
+      if (lastTick) socket.emit("tick", { symbol, tick: lastTick });
+    }
+
     const watchlist = await Watchlist.findOne({ user: socket.user.id });
     if (watchlist?.symbols) {
       for (const item of watchlist.symbols) {
@@ -82,13 +83,13 @@ function init(server) {
       }
     }
 
-    // Subscribe to user's alerted stocks (in addition to watchlist)
     const alerts = await Alert.find({ user: socket.user.id, status: "active" });
     const alertedSymbols = new Set(alerts.map((a) => a.instrument_key));
     for (const symbol of alertedSymbols) {
       if (!subscribed.has(symbol)) {
         subscribed.add(symbol);
         await redisService.addUserToStock(socket.user.id, symbol);
+        await redisService.addPersistentStock(symbol); // Persist for background updates
         if ((await redisService.getStockUserCount(symbol)) === 1) {
           upstoxService.subscribe([symbol]);
           console.log(`🌐 First global subscription to ${symbol} for alerts`);
@@ -107,11 +108,9 @@ function init(server) {
         if ((await redisService.getStockUserCount(symbol)) === 1) {
           upstoxService.subscribe([symbol]);
           console.log(`🌐 First global subscription to ${symbol}`);
-          // New: Proactively fetch last close if no tick exists
           if (!(await redisService.getLastTick(symbol))) {
             const lastClose = await upstoxService.fetchLastClose(symbol);
             if (lastClose) {
-              // Set as initial tick (simplified)
               await redisService.setLastTick(symbol, {
                 fullFeed: { marketFF: { ltpc: { ltp: lastClose.close } } },
               });
@@ -128,6 +127,7 @@ function init(server) {
       if (subscribed.has(symbol)) {
         subscribed.delete(symbol);
         await redisService.removeUserFromStock(socket.user.id, symbol);
+        await redisService.removePersistentStock(symbol); // Remove from persistent if no users
         console.log(`📉 User ${socket.user.id} unsubscribed from ${symbol}`);
         if ((await redisService.getStockUserCount(symbol)) === 0) {
           upstoxService.unsubscribe([symbol]);
@@ -138,10 +138,7 @@ function init(server) {
       socket.leave(symbol);
     });
 
-    // On tick, check alerts first, then handle existing tick logic
     socket.on("tick", async ({ symbol, tick }) => {
-      await checkAlertTriggers(socket.user.id, symbol, tick);
-      // Existing tick handling (e.g., broadcast or store last tick)
       await redisService.setLastTick(symbol, tick);
       io.in(symbol).emit("tick", { symbol, tick });
     });

@@ -2,7 +2,7 @@ const express = require("express");
 const mongoose = require("mongoose");
 const http = require("http");
 const cors = require("cors");
-const session = require('express-session'); // Add this
+const session = require('express-session');
 const config = require("./config/config");
 const socketService = require("./services/socketService");
 const authRoutes = require("./routes/authRoutes");
@@ -13,6 +13,7 @@ const { fetchLastClose } = require("./services/upstoxService");
 const alertsRoutes = require("./routes/alerts");
 const passport = require('passport');
 require('./config/passport');
+const cron = require('node-cron'); // New: for periodic preloading
 
 const app = express();
 const server = http.createServer(app);
@@ -41,14 +42,28 @@ mongoose
   .then(async () => {
     console.log("MongoDB connected");
 
+    // Cleanup any stale stocks
     await redisService.cleanupStaleStocks();
 
+    // Preload last close for all active symbols
     const symbols = await redisService.getAllGlobalStocks();
     console.log("Preloading close prices for:", symbols);
     for (let symbol of symbols) {
       await fetchLastClose(symbol);
     }
     console.log("Preloading complete.");
+
+    // New: Periodic preloading every 5 minutes
+    cron.schedule('*/5 * * * *', async () => {
+      const symbols = await redisService.getAllGlobalStocks();
+      for (let symbol of symbols) {
+        await fetchLastClose(symbol);
+      }
+      console.log('Periodic preload complete.');
+    });
+
+    // New: Start tick processor
+    require("./services/tickProcessor");
 
     socketService.init(server);
     server.listen(config.port, () =>

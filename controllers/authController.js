@@ -1,8 +1,8 @@
 const User = require("../models/User");
 const jwt = require("jsonwebtoken");
 const config = require("../config/config");
-const crypto = require('crypto'); // For generating verification tokens
-const { sendVerificationEmail } = require('../utils/email'); // We'll create this
+const crypto = require('crypto');
+const { sendVerificationEmail } = require('../utils/email');
 const { validationResult } = require('express-validator');
 
 exports.register = async (req, res) => {
@@ -69,8 +69,6 @@ exports.login = async (req, res) => {
     res.status(500).send("Server error");
   }
 };
-
-
 
 exports.verifyEmail = async (req, res) => {
   const { token } = req.params;
@@ -143,7 +141,6 @@ exports.resendVerification = async (req, res) => {
   }
 };
 
-
 exports.getMe = async (req, res) => {
   try {
     // req.user is set by authMiddleware
@@ -164,4 +161,21 @@ exports.googleCallback = (req, res) => {
   const token = jwt.sign(payload, config.jwtSecret, { expiresIn: "24h" });
   // Redirect to frontend with token (adjust URL as needed)
   res.redirect(`${config.frontendBaseUrl}/auth/callback?token=${token}`);
+};
+
+// New: Update device token for push notifications
+exports.updateDeviceToken = async (req, res) => {
+  const { deviceToken } = req.body;
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ msg: "User not found" });
+
+    user.deviceToken = deviceToken;
+    await user.save();
+
+    res.json({ msg: "Device token updated successfully" });
+  } catch (err) {
+    console.error("Error updating device token:", err);
+    res.status(500).send("Server error");
+  }
 };

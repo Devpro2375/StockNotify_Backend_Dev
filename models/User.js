@@ -8,7 +8,8 @@ const userSchema = new mongoose.Schema({
   googleId: { type: String, unique: true, sparse: true }, // For Google OAuth
   isVerified: { type: Boolean, default: false },
   verificationToken: { type: String },
-  verificationTokenExpires: { type: Date }
+  verificationTokenExpires: { type: Date },
+  deviceToken: { type: String } // New: For push notifications
 });
 
 userSchema.pre('save', async function(next) {

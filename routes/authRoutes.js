@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
 const { check } = require('express-validator');
-const passport = require('passport'); // We'll configure this
+const passport = require('passport');
 const authMiddleware = require('../middlewares/authMiddleware');
 
 // Email/Password Register
@@ -22,6 +22,10 @@ router.post('/login', [
 router.post('/resend-verification', authController.resendVerification);
 router.get('/verify/:token', authController.verifyEmail);
 router.get('/me', authMiddleware, authController.getMe);
+
+// New: Update device token
+router.post('/update-token', authMiddleware, authController.updateDeviceToken);
+
 // Google OAuth
 router.get('/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 
