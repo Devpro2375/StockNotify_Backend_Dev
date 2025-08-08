@@ -140,32 +140,47 @@ async function connect() {
       resubscribeAll();
     });
 
-    ws.on("message", async (buffer) => {
-      try {
-        if (!buffer) return;
-        const decoded = FeedResponse.decode(buffer);
-        const io = ioInstance.getIo();
-        if (!io || typeof io.in !== "function") {
-          console.error("Socket.io instance not initialized properly.");
-          return;
-        }
+ ws.on("message", async (buffer) => {
+  try {
+    if (!buffer) return;
+    const decoded = FeedResponse.decode(buffer);
+    const io = ioInstance.getIo();
+    if (!io || typeof io.in !== "function") {
+      console.error("Socket.io instance not initialized properly.");
+      return;
+    }
 
-        for (let symbol of Object.keys(decoded?.feeds || {})) {
-          const tick = decoded.feeds[symbol];
-          await redisService.setLastTick(symbol, tick);
-        await tickQueue.add({ symbol, tick }, {
-        removeOnComplete: { age: 30, count: 1000 }, // Remove completed after 30s or 1000 jobs
-        removeOnFail: { age: 60, count: 500 } // Remove failed after 60s or 500 jobs
-                   });
-          io.in(symbol).emit("tick", { symbol, tick });
-        }
-      } catch (decodeErr) {
-        console.error("Failed to decode WS message:", decodeErr);
-        if (decodeErr.message.includes('OOM')) {
-          await redisService.cleanupStaleStocks(); // Emergency cleanup
-        }
+    for (let symbol of Object.keys(decoded?.feeds || {})) {
+      const tick = decoded.feeds[symbol];
+      await redisService.setLastTick(symbol, tick);  // Keep full tick in Redis for now
+
+      // Extract only ltp (handle both marketFF and indexFF structures)
+      let ltp = null;
+      try {
+        ltp = tick?.fullFeed?.marketFF?.ltpc?.ltp ?? tick?.fullFeed?.indexFF?.ltpc?.ltp;
+      } catch (extractErr) {
+        console.error(`Failed to extract LTP for ${symbol}:`, extractErr.message);
+        continue;  // Skip queuing if LTP can't be extracted
       }
-    });
+
+      if (ltp !== null) {
+        // Queue filtered data
+        await tickQueue.add({ symbol, ltp }, {
+          removeOnComplete: { age: 30, count: 1000 },
+          removeOnFail: { age: 60, count: 500 }
+        });
+      }
+
+      io.in(symbol).emit("tick", { symbol, tick });  // Emit full tick to clients (if needed)
+    }
+  } catch (decodeErr) {
+    console.error("Failed to decode WS message:", decodeErr);
+    if (decodeErr.message.includes('OOM')) {
+      await redisService.cleanupStaleStocks(); // Emergency cleanup
+    }
+  }
+});
+
 
     ws.on("close", (code, reason) => {
       console.log(`WS closed: Code ${code}, Reason: ${reason}`);

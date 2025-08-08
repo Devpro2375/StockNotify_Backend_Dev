@@ -19,8 +19,11 @@ const tickQueue = new Queue('tick-processing', {
 
 // Processor with debouncing
 let lastProcessed = {};
+
 tickQueue.process(async (job) => {
-  const { symbol, tick } = job.data;
+  const { symbol, ltp } = job.data;
+  if (ltp === null || ltp === undefined) return;  // Skip if no valid LTP
+
   const now = Date.now();
   if (lastProcessed[symbol] && now - lastProcessed[symbol] < 1000) return; // Debounce to 1/sec per symbol
   lastProcessed[symbol] = now;
@@ -34,9 +37,7 @@ tickQueue.process(async (job) => {
       status: "active",
     });
     for (const alert of alerts) {
-      const price =
-        tick?.fullFeed?.marketFF?.ltpc?.ltp ?? tick?.fullFeed?.indexFF?.ltpc?.ltp;
-      if (!price) continue;
+      const price = ltp;  // Use direct ltp
 
       let triggered = false;
       if (alert.trend === "bullish") {
@@ -69,6 +70,7 @@ tickQueue.process(async (job) => {
     }
   }
 });
+
 
 // Increase frequency and scope
 setInterval(async () => {
