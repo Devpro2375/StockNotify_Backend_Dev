@@ -4,18 +4,17 @@ const config = require("../config/config");
 const ioInstance = require("./ioInstance");
 const redisService = require("./redisService");
 const Queue = require('bull');
-
+const { updateAlertStatus } = require("./socketService");
+const alertService = require("./alertService");
 // Load Protobuf (unchanged)
 const protoRoot = require("../proto/marketdata.js");
 let FeedResponse;
 try {
-  FeedResponse =
-    protoRoot.com.upstox.marketdatafeederv3udapi.rpc.proto.FeedResponse;
+  FeedResponse = protoRoot.com.upstox.marketdatafeederv3udapi.rpc.proto.FeedResponse;
   console.log("Loaded FeedResponse using exact package path (v3udapi)");
 } catch (e) {
   try {
-    FeedResponse =
-      protoRoot.com.upstox.marketdatafeederv3udapi.proto.FeedResponse;
+    FeedResponse = protoRoot.com.upstox.marketdatafeederv3udapi.proto.FeedResponse;
     console.log("Loaded FeedResponse using shorter v3udapi path");
   } catch (e) {
     try {
@@ -45,7 +44,6 @@ if (!FeedResponse || typeof FeedResponse.decode !== "function") {
 }
 console.log("FeedResponse loaded successfully with decode method.");
 
-// Tick queue
 const tickQueue = new Queue('tick-processing', {
   redis: { host: config.redisHost, port: config.redisPort, password: config.redisPassword }
 });
@@ -100,10 +98,10 @@ async function fetchLastClose(instrumentKey) {
     const payload = {
       timestamp: last[0],
       open: last[1],
-      high: last[2],
-      low: last[3],
-      close: last[4],
-      volume: last[5],
+      high: last,
+      low: last,
+      close: last,
+      volume: last,
     };
     await redisService.setLastClosePrice(instrumentKey, payload);
     return payload;
@@ -140,7 +138,8 @@ async function connect() {
       resubscribeAll();
     });
 
- ws.on("message", async (buffer) => {
+// In the WebSocket message handler, update the call:
+ws.on("message", async (buffer) => {
   try {
     if (!buffer) return;
     const decoded = FeedResponse.decode(buffer);
@@ -152,35 +151,35 @@ async function connect() {
 
     for (let symbol of Object.keys(decoded?.feeds || {})) {
       const tick = decoded.feeds[symbol];
-      await redisService.setLastTick(symbol, tick);  // Keep full tick in Redis for now
+      await redisService.setLastTick(symbol, tick);
 
-      // Extract only ltp (handle both marketFF and indexFF structures)
       let ltp = null;
       try {
         ltp = tick?.fullFeed?.marketFF?.ltpc?.ltp ?? tick?.fullFeed?.indexFF?.ltpc?.ltp;
       } catch (extractErr) {
         console.error(`Failed to extract LTP for ${symbol}:`, extractErr.message);
-        continue;  // Skip queuing if LTP can't be extracted
+        continue;
       }
 
       if (ltp !== null) {
-        // Queue filtered data
         await tickQueue.add({ symbol, ltp }, {
           removeOnComplete: { age: 30, count: 1000 },
           removeOnFail: { age: 60, count: 500 }
         });
       }
 
-      io.in(symbol).emit("tick", { symbol, tick });  // Emit full tick to clients (if needed)
+      io.in(symbol).emit("tick", { symbol, tick });
+
+      // Updated call - pass io instance
+      await alertService.updateAlertStatus(symbol, tick, io);
     }
   } catch (decodeErr) {
     console.error("Failed to decode WS message:", decodeErr);
     if (decodeErr.message.includes('OOM')) {
-      await redisService.cleanupStaleStocks(); // Emergency cleanup
+      await redisService.cleanupStaleStocks();
     }
   }
 });
-
 
     ws.on("close", (code, reason) => {
       console.log(`WS closed: Code ${code}, Reason: ${reason}`);

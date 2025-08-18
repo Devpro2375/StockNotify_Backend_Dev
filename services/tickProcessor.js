@@ -4,28 +4,26 @@ const config = require("../config/config");
 const Alert = require("../models/Alert");
 const User = require("../models/User");
 const redisService = require("./redisService");
+const { STATUSES } = require("./socketService");
 
-// Initialize Firebase
 admin.initializeApp({
   credential: admin.credential.cert(config.firebaseServiceAccount)
 });
 
-// Tick queue with optimizations
 const tickQueue = new Queue('tick-processing', {
   redis: { host: config.redisHost, port: config.redisPort, password: config.redisPassword },
-  limiter: { max: 500, duration: 1000 }, // Limit to 500 jobs/sec to prevent overload
-  settings: { maxStalledCount: 2, stalledInterval: 5000, lockDuration: 30000 } // Handle stalls gracefully
+  limiter: { max: 500, duration: 1000 },
+  settings: { maxStalledCount: 2, stalledInterval: 5000, lockDuration: 30000 }
 });
 
-// Processor with debouncing
 let lastProcessed = {};
 
 tickQueue.process(async (job) => {
   const { symbol, ltp } = job.data;
-  if (ltp === null || ltp === undefined) return;  // Skip if no valid LTP
+  if (ltp === null || ltp === undefined) return;
 
   const now = Date.now();
-  if (lastProcessed[symbol] && now - lastProcessed[symbol] < 1000) return; // Debounce to 1/sec per symbol
+  if (lastProcessed[symbol] && now - lastProcessed[symbol] < 1000) return;
   lastProcessed[symbol] = now;
 
   const users = await redisService.getStockUsers(symbol);
@@ -34,10 +32,10 @@ tickQueue.process(async (job) => {
     const alerts = await Alert.find({
       user: userId,
       instrument_key: symbol,
-      status: "active",
+      status: { $nin: [STATUSES.SL_HIT, STATUSES.TARGET_HIT] },
     });
     for (const alert of alerts) {
-      const price = ltp;  // Use direct ltp
+      const price = ltp;
 
       let triggered = false;
       if (alert.trend === "bullish") {
@@ -49,9 +47,9 @@ tickQueue.process(async (job) => {
       }
 
       if (triggered) {
-        await Alert.updateOne({ _id: alert._id }, { status: "triggered" });
+        const newStatus = (price <= alert.stop_loss) ? STATUSES.SL_HIT : STATUSES.TARGET_HIT;
+        await Alert.updateOne({ _id: alert._id }, { status: newStatus });
 
-        // Send push notification (persistent even if app closed)
         const user = await User.findById(userId);
         if (user && user.deviceToken) {
           try {
@@ -59,7 +57,7 @@ tickQueue.process(async (job) => {
               token: user.deviceToken,
               notification: {
                 title: 'Alert Triggered',
-                body: `Symbol: ${symbol} at price ${price}`
+                body: `Symbol: ${symbol} at price ${price} - Status: ${newStatus}`
               }
             });
           } catch (err) {
@@ -71,12 +69,10 @@ tickQueue.process(async (job) => {
   }
 });
 
-
-// Increase frequency and scope
 setInterval(async () => {
-  await tickQueue.clean(10000, 'completed'); // Clean completed jobs older than 10 seconds
+  await tickQueue.clean(10000, 'completed');
   await tickQueue.clean(10000, 'failed');
-  await tickQueue.clean(10000, 'wait'); // Also clean waiting jobs if needed
-  await tickQueue.clean(10000, 'active'); // Clean active (potentially stalled)
-  console.log('Bull queue cleaned'); // Log for monitoring
-}, 10000); // Every 10 seconds
+  await tickQueue.clean(10000, 'wait');
+  await tickQueue.clean(10000, 'active');
+  console.log('Bull queue cleaned');
+}, 10000);

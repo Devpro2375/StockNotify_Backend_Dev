@@ -13,7 +13,10 @@ const { fetchLastClose } = require("./services/upstoxService");
 const alertsRoutes = require("./routes/alerts");
 const passport = require('passport');
 require('./config/passport');
-const cron = require('node-cron'); // New: for periodic preloading
+const cron = require('node-cron');
+const Alert = require("./models/Alert");
+const upstoxService = require("./services/upstoxService");
+const { STATUSES } = require("./services/socketService");
 
 const app = express();
 const server = http.createServer(app);
@@ -21,16 +24,15 @@ const server = http.createServer(app);
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-// Add session middleware BEFORE passport
 app.use(session({
   secret: config.sessionSecret,
   resave: false,
   saveUninitialized: true,
-  cookie: { secure: false } // Set secure: true in production with HTTPS
+  cookie: { secure: false }
 }));
 
 app.use(passport.initialize());
-app.use(passport.session()); // Add this for Passport session support
+app.use(passport.session());
 
 app.use("/api/auth", authRoutes);
 app.use("/api/watchlist", watchlistRoutes);
@@ -42,10 +44,8 @@ mongoose
   .then(async () => {
     console.log("MongoDB connected");
 
-    // Cleanup any stale stocks
     await redisService.cleanupStaleStocks();
 
-    // Preload last close for all active symbols
     const symbols = await redisService.getAllGlobalStocks();
     console.log("Preloading close prices for:", symbols);
     for (let symbol of symbols) {
@@ -53,7 +53,6 @@ mongoose
     }
     console.log("Preloading complete.");
 
-    // New: Periodic preloading every 5 minutes
     cron.schedule('*/5 * * * *', async () => {
       const symbols = await redisService.getAllGlobalStocks();
       for (let symbol of symbols) {
@@ -62,7 +61,22 @@ mongoose
       console.log('Periodic preload complete.');
     });
 
-    // New: Start tick processor
+    cron.schedule('*/5 * * * *', async () => {
+      const persistent = await redisService.getPersistentStocks();
+      for (const symbol of persistent) {
+        const activeAlerts = await Alert.countDocuments({
+          instrument_key: symbol,
+          status: { $nin: [STATUSES.SL_HIT, STATUSES.TARGET_HIT] }
+        });
+        if (activeAlerts === 0 && (await redisService.getStockUserCount(symbol)) === 0) {
+          await redisService.removePersistentStock(symbol);
+          upstoxService.unsubscribe([symbol]);
+          console.log(`Cleaned persistent stock: ${symbol}`);
+        }
+      }
+      console.log('Cleaned up persistent stocks');
+    });
+
     require("./services/tickProcessor");
 
     socketService.init(server);
