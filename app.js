@@ -26,7 +26,7 @@ const AccessToken = require("./models/AccessToken");
 const app = express();
 const server = http.createServer(app);
 
-app.use(cors({ origin: "*" }));
+app.use(cors({ origin: "*" })); 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(session({
