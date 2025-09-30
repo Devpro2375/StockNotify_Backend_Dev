@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router();
 const config = require('../config/config');
 const AccessToken = require('../models/AccessToken');
-const axios = require('axios'); // NEW: For token testing
+const axios = require('axios');
+const upstoxService = require('../services/upstoxService'); // NEW: Require upstoxService to trigger reconnect
 
 // Middleware to check if admin is logged in
 const isAdminLoggedIn = (req, res, next) => {
@@ -144,15 +145,15 @@ router.get('/', isAdminLoggedIn, async (req, res) => {
             }
 
             async function testToken(showMsg) {
-              console.log('Starting token test...'); // Debug log
+              console.log('Starting token test...');
               try {
                 const response = await fetch('/admin/test-token', { method: 'POST' });
-                console.log('Fetch response status:', response.status); // Debug log
+                console.log('Fetch response status:', response.status);
                 if (!response.ok) {
                   throw new Error('Network response was not ok');
                 }
                 const result = await response.json();
-                console.log('Test result:', result); // Debug log
+                console.log('Test result:', result);
                 const status = document.getElementById('connectionStatus');
                 if (result.valid) {
                   status.innerHTML = '<div class="status-dot"></div> Connected';
@@ -164,7 +165,7 @@ router.get('/', isAdminLoggedIn, async (req, res) => {
                   if (showMsg) showMessage('Token is invalid or expired.', 'error');
                 }
               } catch (err) {
-                console.error('Error in testToken:', err); // Debug log
+                console.error('Error in testToken:', err);
                 const status = document.getElementById('connectionStatus');
                 status.innerHTML = '<div class="status-dot"></div> Not Connected';
                 status.className = 'not-connected';
@@ -188,18 +189,21 @@ router.get('/', isAdminLoggedIn, async (req, res) => {
   }
 });
 
-// POST /admin/update-token - Update token in DB
+// POST /admin/update-token - Update token in DB and trigger reconnect
 router.post('/update-token', isAdminLoggedIn, async (req, res) => {
   const { token } = req.body;
   try {
     await AccessToken.updateOne({}, { token, updatedAt: Date.now() }, { upsert: true });
-    res.redirect('/admin?success=Token updated successfully!');
+    // NEW: Trigger reconnect to apply the new token immediately
+    await upstoxService.connect();
+    res.redirect('/admin?success=Token updated and connection refreshed successfully!');
   } catch (err) {
-    res.redirect('/admin?error=Failed to update token.');
+    console.error('Error updating token or reconnecting:', err);
+    res.redirect('/admin?error=Failed to update token or refresh connection.');
   }
 });
 
-// NEW: POST /admin/test-token - Test token validity
+// POST /admin/test-token - Test token validity
 router.post('/test-token', isAdminLoggedIn, async (req, res) => {
   try {
     const tokenDoc = await AccessToken.findOne();
