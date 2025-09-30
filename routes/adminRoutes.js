@@ -123,7 +123,7 @@ router.get('/', isAdminLoggedIn, async (req, res) => {
               <input type="text" id="token" name="token" required aria-label="New Access Token">
               <button type="submit">Update Token</button>
             </form>
-            <button onclick="testToken(true)">Test Current Token</button>
+            <button onclick="testConnection(true)">Test Connection</button>
             <a href="/admin/logout" onclick="return confirm('Are you sure you want to logout?');">Logout</a>
           </div>
           <script>
@@ -144,37 +144,47 @@ router.get('/', isAdminLoggedIn, async (req, res) => {
               return true;
             }
 
-            async function testToken(showMsg) {
-              console.log('Starting token test...');
+            async function updateStatus(showMsg) {
               try {
-                const response = await fetch('/admin/test-token', { method: 'POST' });
-                console.log('Fetch response status:', response.status);
-                if (!response.ok) {
-                  throw new Error('Network response was not ok');
-                }
-                const result = await response.json();
-                console.log('Test result:', result);
+                // Test REST token
+                const tokenResponse = await fetch('/admin/test-token', { method: 'POST' });
+                if (!tokenResponse.ok) throw new Error('Token test failed');
+                const tokenResult = await tokenResponse.json();
+
+                // Test WS status
+                const wsResponse = await fetch('/admin/ws-status');
+                if (!wsResponse.ok) throw new Error('WS status check failed');
+                const wsResult = await wsResponse.json();
+
                 const status = document.getElementById('connectionStatus');
-                if (result.valid) {
-                  status.innerHTML = '<div class="status-dot"></div> Connected';
+                if (tokenResult.valid && wsResult.connected) {
+                  status.innerHTML = '<div class="status-dot"></div> Connected (WS Active)';
                   status.className = 'connected';
-                  if (showMsg) showMessage('Token is valid!', 'success');
+                  if (showMsg) showMessage('Connection is active!', 'success');
                 } else {
-                  status.innerHTML = '<div class="status-dot"></div> Not Connected';
+                  const errorMsg = !tokenResult.valid ? 'Invalid token' : wsResult.status;
+                  status.innerHTML = '<div class="status-dot"></div> Not Connected (' + errorMsg + ')';
                   status.className = 'not-connected';
-                  if (showMsg) showMessage('Token is invalid or expired.', 'error');
+                  if (showMsg) showMessage('Connection issue: ' + errorMsg, 'error');
                 }
               } catch (err) {
-                console.error('Error in testToken:', err);
+                console.error('Error updating status:', err);
                 const status = document.getElementById('connectionStatus');
-                status.innerHTML = '<div class="status-dot"></div> Not Connected';
+                status.innerHTML = '<div class="status-dot"></div> Not Connected (Error)';
                 status.className = 'not-connected';
-                if (showMsg) showMessage('Error testing token: ' + err.message, 'error');
+                if (showMsg) showMessage('Error checking status: ' + err.message, 'error');
               }
             }
 
-            // Auto-test on page load without message
-            window.addEventListener('load', () => testToken(false));
+            async function testConnection(showMsg = true) {
+              await updateStatus(showMsg);
+            }
+
+            // Auto-update on load and every 10 seconds
+            window.addEventListener('load', () => {
+              updateStatus(false);
+              setInterval(() => updateStatus(false), 10000);
+            });
 
             // Handle query params for messages
             const urlParams = new URLSearchParams(window.location.search);
@@ -194,12 +204,12 @@ router.post('/update-token', isAdminLoggedIn, async (req, res) => {
   const { token } = req.body;
   try {
     await AccessToken.updateOne({}, { token, updatedAt: Date.now() }, { upsert: true });
-    // NEW: Trigger reconnect to apply the new token immediately
+    // Trigger reconnect and wait for it
     await upstoxService.connect();
-    res.redirect('/admin?success=Token updated and connection refreshed successfully!');
+    res.redirect('/admin?success=Token updated and WS reconnected successfully!');
   } catch (err) {
     console.error('Error updating token or reconnecting:', err);
-    res.redirect('/admin?error=Failed to update token or refresh connection.');
+    res.redirect(`/admin?error=Failed to update token or reconnect WS: ${err.message}`);
   }
 });
 
@@ -219,6 +229,12 @@ router.post('/test-token', isAdminLoggedIn, async (req, res) => {
     console.error('Test token error:', err.response ? err.response.data : err.message);
     res.json({ valid: false });
   }
+});
+
+// NEW: GET /admin/ws-status - Get WebSocket status
+router.get('/ws-status', isAdminLoggedIn, (req, res) => {
+  const status = upstoxService.getWsStatus();
+  res.json(status);
 });
 
 // GET /admin/logout - Logout

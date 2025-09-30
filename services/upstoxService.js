@@ -131,67 +131,73 @@ async function fetchLastClose(instrumentKey) {
 }
 
 async function connect() {
-  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-    console.error("Max reconnect attempts reached. Manual intervention needed.");
-    return;
-  }
-  try {
-    const url = await getAuthorizedUrl();
-    if (ws && ws.readyState !== WebSocket.CLOSED) {
-      console.log("Closing existing WebSocket.");
-      ws.close(1000, "Reconnecting");
-      await new Promise(resolve => setTimeout(resolve, 2000));
+  return new Promise(async (resolve, reject) => {
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      console.error("Max reconnect attempts reached. Manual intervention needed.");
+      return reject(new Error("Max reconnect attempts reached"));
     }
-    ws = new WebSocket(url, { followRedirects: true });
-    ws.on("open", () => {
-      console.log("Connected to Upstox WS");
-      reconnectAttempts = 0;
-      resubscribeAll();
-    });
-    ws.on("message", async (buffer) => {
-      try {
-        if (!buffer) return;
-        const decoded = FeedResponse.decode(buffer);
-        const io = ioInstance.getIo();
-        if (!io || typeof io.in !== "function") {
-          console.error("Socket.io instance not initialized properly.");
-          return;
-        }
-        for (let symbol of Object.keys(decoded?.feeds || {})) {
-          const tick = decoded.feeds[symbol];
-          await redisService.setLastTick(symbol, tick);
-          // NEW: Add to alert queue for backend processing (offline-capable)
-          await alertQueue.add({ symbol, tick });
-          // EXISTING: Emit to online users only
-          io.in(symbol).emit("tick", { symbol, tick });
-        }
-      } catch (decodeErr) {
-        console.error("Failed to decode WS message:", decodeErr);
-        if (decodeErr.message.includes('OOM')) {
-          await redisService.cleanupStaleStocks();
-        }
+    try {
+      const url = await getAuthorizedUrl();
+      if (ws && ws.readyState !== WebSocket.CLOSED) {
+        console.log("Closing existing WebSocket.");
+        ws.close(1000, "Reconnecting");
+        await new Promise(resolve => setTimeout(resolve, 2000));
       }
-    });
-    ws.on("close", (code, reason) => {
-      console.log(`WS closed: Code ${code}, Reason: ${reason}`);
+      ws = new WebSocket(url, { followRedirects: true });
+      ws.on("open", () => {
+        console.log("Connected to Upstox WS");
+        reconnectAttempts = 0;
+        resubscribeAll();
+        const io = ioInstance.getIo();
+        if (io) io.emit("ws-reconnected"); // NEW: Notify all clients of successful reconnect
+        resolve();
+      });
+      ws.on("message", async (buffer) => {
+        try {
+          if (!buffer) return;
+          const decoded = FeedResponse.decode(buffer);
+          const io = ioInstance.getIo();
+          if (!io || typeof io.in !== "function") {
+            console.error("Socket.io instance not initialized properly.");
+            return;
+          }
+          for (let symbol of Object.keys(decoded?.feeds || {})) {
+            const tick = decoded.feeds[symbol];
+            await redisService.setLastTick(symbol, tick);
+            // NEW: Add to alert queue for backend processing (offline-capable)
+            await alertQueue.add({ symbol, tick });
+            // EXISTING: Emit to online users only
+            io.in(symbol).emit("tick", { symbol, tick });
+          }
+        } catch (decodeErr) {
+          console.error("Failed to decode WS message:", decodeErr);
+          if (decodeErr.message.includes('OOM')) {
+            await redisService.cleanupStaleStocks();
+          }
+        }
+      });
+      ws.on("close", (code, reason) => {
+        console.log(`WS closed: Code ${code}, Reason: ${reason}`);
+        reconnectAttempts++;
+        const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
+        console.log(`Reconnecting in ${delay / 1000} seconds (Attempt ${reconnectAttempts})...`);
+        setTimeout(() => connect().then(resolve).catch(reject), delay);
+      });
+      ws.on("error", (err) => {
+        console.error("WS error:", err.message);
+        if (err.message.includes("403")) {
+          console.error("403 Forbidden: Check for multiple connections or stale sessions. Fetching fresh URL.");
+        }
+        if (ws) ws.close();
+        reject(err);
+      });
+    } catch (err) {
+      console.error("Connect failed:", err.message);
       reconnectAttempts++;
       const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
-      console.log(`Reconnecting in ${delay / 1000} seconds (Attempt ${reconnectAttempts})...`);
-      setTimeout(connect, delay);
-    });
-    ws.on("error", (err) => {
-      console.error("WS error:", err.message);
-      if (err.message.includes("403")) {
-        console.error("403 Forbidden: Check for multiple connections or stale sessions. Fetching fresh URL.");
-      }
-      if (ws) ws.close();
-    });
-  } catch (err) {
-    console.error("Connect failed:", err.message);
-    reconnectAttempts++;
-    const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
-    setTimeout(connect, delay);
-  }
+      setTimeout(() => connect().then(resolve).catch(reject), delay);
+    }
+  });
 }
 
 function sendSubscription(method, symbols) {
@@ -207,8 +213,21 @@ function sendSubscription(method, symbols) {
   );
 }
 
+// NEW: Function to get WS status
+function getWsStatus() {
+  if (!ws) return { connected: false, status: 'Not initialized' };
+  switch (ws.readyState) {
+    case WebSocket.OPEN: return { connected: true, status: 'Connected' };
+    case WebSocket.CONNECTING: return { connected: false, status: 'Connecting' };
+    case WebSocket.CLOSING: return { connected: false, status: 'Closing' };
+    case WebSocket.CLOSED: return { connected: false, status: 'Disconnected' };
+    default: return { connected: false, status: 'Unknown' };
+  }
+}
+
 // Add these exports here (they belong in this file)
 exports.subscribe = (symbols) => sendSubscription("sub", symbols);
 exports.unsubscribe = (symbols) => sendSubscription("unsub", symbols);
 exports.fetchLastClose = fetchLastClose;
 exports.connect = connect;
+exports.getWsStatus = getWsStatus;
