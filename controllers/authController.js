@@ -1,11 +1,20 @@
-// controllers/authController.js
-
 const User = require("../models/User");
 const jwt = require("jsonwebtoken");
 const config = require("../config/config");
 const crypto = require('crypto');
 const { sendVerificationEmail } = require('../utils/email');
 const { validationResult } = require('express-validator');
+
+// Generate JWT access token
+const generateAccessToken = (userId) => {
+  const payload = { user: { id: userId } };
+  return jwt.sign(payload, config.jwtSecret, { expiresIn: "15m" });
+};
+
+// Generate refresh token
+const generateRefreshToken = () => {
+  return crypto.randomBytes(40).toString('hex');
+};
 
 exports.register = async (req, res) => {
   const errors = validationResult(req);
@@ -62,10 +71,32 @@ exports.login = async (req, res) => {
     const isMatch = await user.comparePassword(password);
     if (!isMatch) return res.status(400).json({ msg: "Invalid credentials" });
 
-    const payload = { user: { id: user.id } };
-    const token = jwt.sign(payload, config.jwtSecret, { expiresIn: "24h" });
+    // Generate tokens
+    const accessToken = generateAccessToken(user.id);
+    const refreshToken = generateRefreshToken();
 
-    res.json({ token, user: { id: user.id, username: user.username, email: user.email } });
+    // Save refresh token to database
+    user.refreshToken = refreshToken;
+    await user.save();
+
+    // Set refresh token as httpOnly cookie
+    res.cookie('refreshToken', refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      path: '/'
+    });
+
+    res.json({ 
+      token: accessToken, 
+      user: { 
+        id: user.id, 
+        username: user.username, 
+        email: user.email,
+        isVerified: user.isVerified 
+      } 
+    });
   } catch (err) {
     console.error(err);
     res.status(500).send("Server error");
@@ -74,19 +105,17 @@ exports.login = async (req, res) => {
 
 exports.verifyEmail = async (req, res) => {
   const { token } = req.params;
-  console.log('Verification attempt with token:', token); // Log the incoming token
+  console.log('Verification attempt with token:', token);
 
   try {
-    // Attempt to find user with matching token that is not expired
     const user = await User.findOne({
       verificationToken: token,
       verificationTokenExpires: { $gt: Date.now() }
     });
 
     if (!user) {
-      // Additional check: See if token exists but is expired or already used
       const existingUser = await User.findOne({ verificationToken: token });
-      if (existingUser) {
+      if (existingUser && existingUser.verificationTokenExpires < Date.now()) {
         console.log('Token found but expired for user:', existingUser.email);
         return res.status(400).json({ msg: "Token has expired. Please request a new verification email." });
       } else if (existingUser && existingUser.isVerified) {
@@ -99,7 +128,6 @@ exports.verifyEmail = async (req, res) => {
 
     console.log('Valid token for user:', user.email);
 
-    // If already verified (edge case), return early
     if (user.isVerified) {
       console.log('User already verified:', user.email);
       return res.json({ msg: "Email already verified. You can log in now." });
@@ -110,10 +138,23 @@ exports.verifyEmail = async (req, res) => {
     user.verificationTokenExpires = undefined;
     await user.save();
 
-    const payload = { user: { id: user.id } };
-    const jwtToken = jwt.sign(payload, config.jwtSecret, { expiresIn: "24h" });
+    // Generate tokens
+    const accessToken = generateAccessToken(user.id);
+    const refreshToken = generateRefreshToken();
 
-    res.json({ msg: "Email verified successfully", token: jwtToken });
+    user.refreshToken = refreshToken;
+    await user.save();
+
+    // Set refresh token as httpOnly cookie
+    res.cookie('refreshToken', refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      path: '/'
+    });
+
+    res.json({ msg: "Email verified successfully", token: accessToken });
   } catch (err) {
     console.error('Verification error:', err);
     res.status(500).send("Server error");
@@ -130,7 +171,7 @@ exports.resendVerification = async (req, res) => {
 
     // Generate new token
     user.verificationToken = crypto.randomBytes(32).toString('hex');
-    user.verificationTokenExpires = Date.now() + 3600000; // 1 hour
+    user.verificationTokenExpires = Date.now() + 3600000;
     await user.save();
 
     const verifyUrl = `${config.frontendBaseUrl}/verify-email?token=${user.verificationToken}`;
@@ -145,8 +186,7 @@ exports.resendVerification = async (req, res) => {
 
 exports.getMe = async (req, res) => {
   try {
-    // req.user is set by authMiddleware
-    const user = await User.findById(req.user.id).select('-password -googleId -verificationToken -verificationTokenExpires');
+    const user = await User.findById(req.user.id).select('-password -googleId -verificationToken -verificationTokenExpires -refreshToken');
     if (!user) {
       return res.status(404).json({ msg: "User not found" });
     }
@@ -157,15 +197,79 @@ exports.getMe = async (req, res) => {
   }
 };
 
-// For Google OAuth success (called by Passport)
-exports.googleCallback = (req, res) => {
-  const payload = { user: { id: req.user.id } };
-  const token = jwt.sign(payload, config.jwtSecret, { expiresIn: "24h" });
-  // Redirect to frontend with token (adjust URL as needed)
-  res.redirect(`${config.frontendBaseUrl}/auth/callback?token=${token}`);
+// Refresh access token
+exports.refreshToken = async (req, res) => {
+  const { refreshToken } = req.cookies;
+
+  if (!refreshToken) {
+    return res.status(401).json({ msg: "No refresh token provided" });
+  }
+
+  try {
+    const user = await User.findOne({ refreshToken });
+    
+    if (!user) {
+      return res.status(403).json({ msg: "Invalid refresh token" });
+    }
+
+    // Generate new access token
+    const newAccessToken = generateAccessToken(user.id);
+
+    res.json({ token: newAccessToken });
+  } catch (err) {
+    console.error("Refresh token error:", err);
+    res.status(500).send("Server error");
+  }
 };
 
-// New: Update device token for push notifications
+// Logout
+exports.logout = async (req, res) => {
+  try {
+    // Clear refresh token from database
+    await User.findByIdAndUpdate(req.user.id, { refreshToken: null });
+    
+    // Clear cookie
+    res.clearCookie('refreshToken', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+      path: '/'
+    });
+    
+    res.json({ msg: "Logged out successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Server error");
+  }
+};
+
+// Google OAuth callback
+exports.googleCallback = async (req, res) => {
+  try {
+    const accessToken = generateAccessToken(req.user.id);
+    const refreshToken = generateRefreshToken();
+
+    // Save refresh token
+    await User.findByIdAndUpdate(req.user.id, { refreshToken });
+
+    // Set refresh token cookie
+    res.cookie('refreshToken', refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      path: '/'
+    });
+
+    // Redirect to frontend with access token
+    res.redirect(`${config.frontendBaseUrl}/auth/callback?token=${accessToken}`);
+  } catch (err) {
+    console.error("Google callback error:", err);
+    res.redirect(`${config.frontendBaseUrl}/login?error=auth_failed`);
+  }
+};
+
+// Update device token
 exports.updateDeviceToken = async (req, res) => {
   const { deviceToken } = req.body;
   try {

@@ -1,5 +1,3 @@
-// routes/authRoutes.js
-
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
@@ -23,10 +21,14 @@ router.post('/login', [
 // Email Verification
 router.post('/resend-verification', authController.resendVerification);
 router.get('/verify/:token', authController.verifyEmail);
-router.get('/me', authMiddleware, authController.getMe);
 
-// New: Update device token
+// Protected routes
+router.get('/me', authMiddleware, authController.getMe);
 router.post('/update-token', authMiddleware, authController.updateDeviceToken);
+router.post('/logout', authMiddleware, authController.logout);
+
+// Refresh token (public route, uses cookie)
+router.post('/refresh', authController.refreshToken);
 
 // Google OAuth
 router.get('/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
