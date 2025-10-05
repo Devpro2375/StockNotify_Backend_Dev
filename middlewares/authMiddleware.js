@@ -1,10 +1,9 @@
-// middlewares/authMiddleware.js
 const jwt = require('jsonwebtoken');
 const config = require('../config/config');
 
-// Simple in-memory cache for validated tokens (optional but helpful)
+// Token cache to reduce JWT verification overhead
 const tokenCache = new Map();
-const CACHE_TTL = 60000; // 1 minute cache
+const CACHE_TTL = 60000; // 1 minute
 
 module.exports = (req, res, next) => {
   const token = req.header('Authorization')?.replace('Bearer ', '');
@@ -14,14 +13,14 @@ module.exports = (req, res, next) => {
   }
 
   try {
-    // OPTIMIZATION 1: Check cache first
+    // Check cache first
     const cached = tokenCache.get(token);
     if (cached && cached.expiresAt > Date.now()) {
       req.user = cached.user;
       return next();
     }
 
-    // OPTIMIZATION 2: Verify token
+    // Verify token
     const decoded = jwt.verify(token, config.jwtSecret);
     req.user = decoded.user;
     
@@ -43,7 +42,7 @@ module.exports = (req, res, next) => {
   }
 };
 
-// Cleanup cache periodically (prevent memory leak)
+// Cleanup cache periodically
 setInterval(() => {
   const now = Date.now();
   for (const [token, data] of tokenCache.entries()) {
@@ -51,4 +50,4 @@ setInterval(() => {
       tokenCache.delete(token);
     }
   }
-}, 60000); // Clean every minute
+}, 60000);

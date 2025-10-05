@@ -15,13 +15,11 @@ const userSchema = new mongoose.Schema({
   timestamps: true
 });
 
-
-
-// models/User.js - Add these indexes
 userSchema.index({ email: 1 });
 userSchema.index({ username: 1 });
-userSchema.index({ refreshToken: 1 }); // CRITICAL for fast refresh
 userSchema.index({ verificationToken: 1 });
+
+module.exports = mongoose.model('User', userSchema);
 
 
 userSchema.pre('save', async function(next) {
