@@ -20,7 +20,8 @@ module.exports = {
   emailPass: 'nyxw oxdn mmvz xokh',
   baseUrl: process.env.BASE_URL,
   frontendBaseUrl: process.env.FRONTEND_BASE_URL,
-  sessionSecret: '9f3b97cfe62a4798a6b8ef1034c72a1d',
+
+  sessionSecret: process.env.SESSION_SECRET,
   adminPassword: process.env.ADMIN_PASSWORD,
   firebaseServiceAccount: process.env.FIREBASE_SERVICE_ACCOUNT
 };

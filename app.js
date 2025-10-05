@@ -3,8 +3,9 @@ const express = require("express");
 const mongoose = require("mongoose");
 const http = require("http");
 const cors = require("cors");
-const cookieParser = require('cookie-parser'); // NEW: Add this
+const cookieParser = require('cookie-parser');
 const session = require('express-session');
+const MongoStore = require('connect-mongo'); // NEW: Add MongoDB session store
 const config = require("./config/config");
 const socketService = require("./services/socketService");
 const authRoutes = require("./routes/authRoutes");
@@ -28,6 +29,11 @@ const server = http.createServer(app);
 
 // ===== MIDDLEWARE SETUP =====
 
+// 0. Trust proxy - CRITICAL for Railway/Render/Heroku
+if (process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1); // Trust first proxy
+}
+
 // 1. Cookie Parser - MUST come before routes
 app.use(cookieParser());
 
@@ -49,11 +55,16 @@ app.use(cors(corsOptions));
 // Handle preflight requests
 app.options('*', cors(corsOptions));
 
-// 4. Session Configuration
+// 4. Session Configuration with MongoDB Store
 app.use(session({
   secret: config.sessionSecret,
   resave: false,
   saveUninitialized: false, // Changed to false for security
+  store: MongoStore.create({
+    mongoUrl: config.mongoURI,
+    touchAfter: 24 * 3600, // Lazy session update (24 hours)
+    ttl: 24 * 60 * 60 // Session TTL (24 hours)
+  }),
   cookie: { 
     secure: process.env.NODE_ENV === 'production', // Only HTTPS in production
     httpOnly: true,

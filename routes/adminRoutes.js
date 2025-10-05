@@ -3,7 +3,7 @@ const router = express.Router();
 const config = require('../config/config');
 const AccessToken = require('../models/AccessToken');
 const axios = require('axios');
-const upstoxService = require('../services/upstoxService'); // NEW: Require upstoxService to trigger reconnect
+const upstoxService = require('../services/upstoxService');
 
 // Middleware to check if admin is logged in
 const isAdminLoggedIn = (req, res, next) => {
@@ -61,12 +61,27 @@ router.get('/login', (req, res) => {
   `);
 });
 
-// POST /admin/login - Handle login
+// POST /admin/login - Handle login with explicit session save
 router.post('/login', (req, res) => {
   const { password } = req.body;
   if (password === config.adminPassword) {
     req.session.adminLoggedIn = true;
-    res.redirect('/admin');
+    
+    // Explicitly save session before redirect (CRITICAL FIX)
+    req.session.save((err) => {
+      if (err) {
+        console.error('Session save error:', err);
+        return res.status(500).send(`
+          <html>
+            <body style="background: #121212; color: #fff; text-align: center; padding: 2rem;">
+              <h1 style="color: #E50914;">Session save error. Please try again.</h1>
+              <a href="/admin/login" style="color: #FFD369;">Back to login</a>
+            </body>
+          </html>
+        `);
+      }
+      res.redirect('/admin');
+    });
   } else {
     res.status(401).send(`
       <html>
@@ -220,7 +235,7 @@ router.post('/test-token', isAdminLoggedIn, async (req, res) => {
     if (!tokenDoc || !tokenDoc.token) {
       return res.json({ valid: false });
     }
-    // Updated: Use a valid Upstox endpoint for testing (e.g., user profile in v2)
+    // Test with valid Upstox endpoint
     await axios.get('https://api.upstox.com/v2/user/profile', {
       headers: { Authorization: `Bearer ${tokenDoc.token}` }
     });
@@ -231,16 +246,21 @@ router.post('/test-token', isAdminLoggedIn, async (req, res) => {
   }
 });
 
-// NEW: GET /admin/ws-status - Get WebSocket status
+// GET /admin/ws-status - Get WebSocket status
 router.get('/ws-status', isAdminLoggedIn, (req, res) => {
   const status = upstoxService.getWsStatus();
   res.json(status);
 });
 
-// GET /admin/logout - Logout
+// GET /admin/logout - Logout with explicit session destroy
 router.get('/logout', (req, res) => {
-  req.session.destroy();
-  res.redirect('/admin/login');
+  req.session.destroy((err) => {
+    if (err) {
+      console.error('Session destroy error:', err);
+    }
+    res.clearCookie('connect.sid'); // Clear session cookie
+    res.redirect('/admin/login');
+  });
 });
 
 module.exports = router;
