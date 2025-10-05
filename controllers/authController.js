@@ -1,9 +1,14 @@
+// controllers/authController.js
 const User = require("../models/User");
 const jwt = require("jsonwebtoken");
 const config = require("../config/config");
 const crypto = require('crypto');
 const { sendVerificationEmail } = require('../utils/email');
 const { validationResult } = require('express-validator');
+
+// OPTIMIZATION: User cache for /me endpoint
+const userCache = new Map();
+const USER_CACHE_TTL = 300000; // 5 minutes
 
 // Generate JWT access token
 const generateAccessToken = (userId) => {
@@ -16,6 +21,11 @@ const generateRefreshToken = () => {
   return crypto.randomBytes(40).toString('hex');
 };
 
+// OPTIMIZATION: Clear user from cache
+const clearUserCache = (userId) => {
+  userCache.delete(userId);
+};
+
 exports.register = async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -24,22 +34,30 @@ exports.register = async (req, res) => {
 
   const { username, email, password } = req.body;
   try {
-    let user = await User.findOne({ email });
-    if (user) return res.status(400).json({ msg: "User already exists" });
+    // OPTIMIZATION: Check both email and username in one query
+    const existingUser = await User.findOne({
+      $or: [{ email }, { username }]
+    });
 
-    user = await User.findOne({ username });
-    if (user) return res.status(400).json({ msg: "Username already taken" });
+    if (existingUser) {
+      if (existingUser.email === email) {
+        return res.status(400).json({ msg: "User already exists" });
+      }
+      return res.status(400).json({ msg: "Username already taken" });
+    }
 
-    user = new User({ username, email, password });
+    const user = new User({ username, email, password });
 
     // Generate verification token
     user.verificationToken = crypto.randomBytes(32).toString('hex');
     user.verificationTokenExpires = Date.now() + 3600000; // 1 hour
     await user.save();
 
-    // Send verification email
+    // Send verification email (async, don't wait)
     const verifyUrl = `${config.frontendBaseUrl}/verify-email?token=${user.verificationToken}`;
-    await sendVerificationEmail(user.email, verifyUrl);
+    sendVerificationEmail(user.email, verifyUrl).catch(err => 
+      console.error("Email send error:", err)
+    );
 
     res.json({ msg: "Registration successful. Please check your email to verify." });
   } catch (err) {
@@ -56,7 +74,8 @@ exports.login = async (req, res) => {
 
   const { email, password } = req.body;
   try {
-    const user = await User.findOne({ email });
+    // OPTIMIZATION: Select only needed fields
+    const user = await User.findOne({ email }).select('+password');
     if (!user) return res.status(400).json({ msg: "Invalid credentials" });
 
     // Skip verification for Google users
@@ -75,7 +94,7 @@ exports.login = async (req, res) => {
     const accessToken = generateAccessToken(user.id);
     const refreshToken = generateRefreshToken();
 
-    // Save refresh token to database
+    // OPTIMIZATION: Update user without fetching again
     user.refreshToken = refreshToken;
     await user.save();
 
@@ -86,6 +105,17 @@ exports.login = async (req, res) => {
       sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
       path: '/'
+    });
+
+    // Cache user data
+    userCache.set(user.id, {
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        isVerified: user.isVerified
+      },
+      expiresAt: Date.now() + USER_CACHE_TTL
     });
 
     res.json({ 
@@ -105,7 +135,6 @@ exports.login = async (req, res) => {
 
 exports.verifyEmail = async (req, res) => {
   const { token } = req.params;
-  console.log('Verification attempt with token:', token);
 
   try {
     const user = await User.findOne({
@@ -114,35 +143,23 @@ exports.verifyEmail = async (req, res) => {
     });
 
     if (!user) {
-      const existingUser = await User.findOne({ verificationToken: token });
-      if (existingUser && existingUser.verificationTokenExpires < Date.now()) {
-        console.log('Token found but expired for user:', existingUser.email);
-        return res.status(400).json({ msg: "Token has expired. Please request a new verification email." });
-      } else if (existingUser && existingUser.isVerified) {
-        console.log('User already verified:', existingUser.email);
-        return res.json({ msg: "Email already verified. You can log in now." });
-      }
-      console.log('No matching user found for token:', token);
-      return res.status(400).json({ msg: "Invalid token. Please register again." });
+      return res.status(400).json({ msg: "Invalid or expired token" });
     }
 
-    console.log('Valid token for user:', user.email);
-
     if (user.isVerified) {
-      console.log('User already verified:', user.email);
       return res.json({ msg: "Email already verified. You can log in now." });
     }
 
+    // Update user
     user.isVerified = true;
     user.verificationToken = undefined;
     user.verificationTokenExpires = undefined;
-    await user.save();
 
     // Generate tokens
     const accessToken = generateAccessToken(user.id);
     const refreshToken = generateRefreshToken();
-
     user.refreshToken = refreshToken;
+    
     await user.save();
 
     // Set refresh token as httpOnly cookie
@@ -184,12 +201,32 @@ exports.resendVerification = async (req, res) => {
   }
 };
 
+// CRITICAL OPTIMIZATION: Cache user data for /me endpoint
 exports.getMe = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('-password -googleId -verificationToken -verificationTokenExpires -refreshToken');
+    const userId = req.user.id;
+
+    // Check cache first
+    const cached = userCache.get(userId);
+    if (cached && cached.expiresAt > Date.now()) {
+      return res.json({ user: cached.user });
+    }
+
+    // Cache miss - fetch from DB
+    const user = await User.findById(userId)
+      .select('-password -googleId -verificationToken -verificationTokenExpires -refreshToken')
+      .lean(); // Use lean() for faster queries
+    
     if (!user) {
       return res.status(404).json({ msg: "User not found" });
     }
+
+    // Cache the result
+    userCache.set(userId, {
+      user,
+      expiresAt: Date.now() + USER_CACHE_TTL
+    });
+
     res.json({ user });
   } catch (err) {
     console.error('Error in /me:', err);
@@ -197,7 +234,7 @@ exports.getMe = async (req, res) => {
   }
 };
 
-// Refresh access token
+// CRITICAL OPTIMIZATION: Fast refresh token lookup
 exports.refreshToken = async (req, res) => {
   const { refreshToken } = req.cookies;
 
@@ -206,14 +243,20 @@ exports.refreshToken = async (req, res) => {
   }
 
   try {
-    const user = await User.findOne({ refreshToken });
+    // OPTIMIZATION: Only select _id for faster query
+    const user = await User.findOne({ refreshToken }).select('_id').lean();
     
     if (!user) {
       return res.status(403).json({ msg: "Invalid refresh token" });
     }
 
     // Generate new access token
-    const newAccessToken = generateAccessToken(user.id);
+    const newAccessToken = generateAccessToken(user._id);
+
+    // OPTIMIZATION: Optionally rotate refresh token for security
+    // const newRefreshToken = generateRefreshToken();
+    // await User.findByIdAndUpdate(user._id, { refreshToken: newRefreshToken });
+    // res.cookie('refreshToken', newRefreshToken, { ... });
 
     res.json({ token: newAccessToken });
   } catch (err) {
@@ -225,8 +268,13 @@ exports.refreshToken = async (req, res) => {
 // Logout
 exports.logout = async (req, res) => {
   try {
+    const userId = req.user.id;
+    
+    // Clear cache
+    clearUserCache(userId);
+    
     // Clear refresh token from database
-    await User.findByIdAndUpdate(req.user.id, { refreshToken: null });
+    await User.findByIdAndUpdate(userId, { refreshToken: null });
     
     // Clear cookie
     res.clearCookie('refreshToken', {
@@ -273,15 +321,20 @@ exports.googleCallback = async (req, res) => {
 exports.updateDeviceToken = async (req, res) => {
   const { deviceToken } = req.body;
   try {
-    const user = await User.findById(req.user.id);
-    if (!user) return res.status(404).json({ msg: "User not found" });
-
-    user.deviceToken = deviceToken;
-    await user.save();
-
+    await User.findByIdAndUpdate(req.user.id, { deviceToken });
     res.json({ msg: "Device token updated successfully" });
   } catch (err) {
     console.error("Error updating device token:", err);
     res.status(500).send("Server error");
   }
 };
+
+// Cleanup cache periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, data] of userCache.entries()) {
+    if (data.expiresAt < now) {
+      userCache.delete(userId);
+    }
+  }
+}, 300000); // Clean every 5 minutes

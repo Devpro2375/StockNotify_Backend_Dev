@@ -15,6 +15,15 @@ const userSchema = new mongoose.Schema({
   timestamps: true
 });
 
+
+
+// models/User.js - Add these indexes
+userSchema.index({ email: 1 });
+userSchema.index({ username: 1 });
+userSchema.index({ refreshToken: 1 }); // CRITICAL for fast refresh
+userSchema.index({ verificationToken: 1 });
+
+
 userSchema.pre('save', async function(next) {
   if (this.isModified('password') && this.password) {
     this.password = await bcrypt.hash(this.password, 10);

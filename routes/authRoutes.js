@@ -1,3 +1,4 @@
+// routes/authRoutes.js
 const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
@@ -22,12 +23,15 @@ router.post('/login', [
 router.post('/resend-verification', authController.resendVerification);
 router.get('/verify/:token', authController.verifyEmail);
 
-// Protected routes
+// OPTIMIZATION: /me endpoint - most frequently called
 router.get('/me', authMiddleware, authController.getMe);
+
+// Protected routes
 router.post('/update-token', authMiddleware, authController.updateDeviceToken);
 router.post('/logout', authMiddleware, authController.logout);
 
-// Refresh token (public route, uses cookie)
+// CRITICAL: Refresh token (public route, uses cookie)
+// This is the most important endpoint for performance
 router.post('/refresh', authController.refreshToken);
 
 // Google OAuth
