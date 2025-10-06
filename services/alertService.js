@@ -1,7 +1,7 @@
 const Alert = require("../models/Alert");
 const User = require("../models/User");
 const redisService = require("./redisService");
-const emailService = require("../utils/email");
+const emailQueue = require("../queues/emailQueue"); // NEW: Import email queue
 const Bull = require("bull");
 const config = require("../config/config");
 const admin = require("firebase-admin");
@@ -33,23 +33,19 @@ function bullishTargetHit(alert, ltp) {
 }
 
 function bullishEnterCondition(alert, ltp) {
-  // Entered: LTP goes BELOW entry price (but still above SL)
   return ltp < alert.entry_price && ltp > alert.stop_loss;
 }
 
 function bullishRunningCondition(alert, previous, ltp) {
-  // After being below entry once, if LTP crosses back above entry
   return previous < alert.entry_price && ltp >= alert.entry_price;
 }
 
 function bullishNearEntry(alert, ltp) {
-  // Within 1% ABOVE entry, but not yet entered
   const diffPercent = ((ltp - alert.entry_price) / alert.entry_price) * 100;
   return ltp > alert.entry_price && diffPercent <= 1;
 }
 
 function bullishStillRunning(alert, ltp) {
-  // Still running if between entry and target (and above SL)
   return ltp >= alert.entry_price && ltp < alert.target_price && ltp > alert.stop_loss;
 }
 
@@ -64,23 +60,19 @@ function bearishTargetHit(alert, ltp) {
 }
 
 function bearishEnterCondition(alert, ltp) {
-  // Entered: LTP goes ABOVE entry price (but still below SL)
   return ltp > alert.entry_price && ltp < alert.stop_loss;
 }
 
 function bearishRunningCondition(alert, previous, ltp) {
-  // After being above entry once, if LTP crosses back below entry
   return previous > alert.entry_price && ltp <= alert.entry_price;
 }
 
 function bearishNearEntry(alert, ltp) {
-  // Within 1% BELOW entry, but not yet entered
   const diffPercent = ((alert.entry_price - ltp) / alert.entry_price) * 100;
   return ltp < alert.entry_price && diffPercent <= 1;
 }
 
 function bearishStillRunning(alert, ltp) {
-  // Still running if between target and SL (not hit either)
   return ltp > alert.target_price && ltp < alert.stop_loss;
 }
 
@@ -146,7 +138,6 @@ alertQueue.process(async (job) => {
 
   if (!ltp) return;
 
-  // Get active alerts from DB
   const alerts = await Alert.find({
     instrument_key: symbol,
     status: { $nin: [STATUSES.SL_HIT, STATUSES.TARGET_HIT] },
@@ -156,7 +147,6 @@ alertQueue.process(async (job) => {
     const user = alert.user;
     if (!user || !user.email) continue;
 
-    // Determine previous price for comparison
     const previous = alert.last_ltp ?? alert.cmp ?? alert.entry_price;
     let newStatus = alert.status ?? STATUSES.PENDING;
     const oldStatus = alert.status;
@@ -164,89 +154,60 @@ alertQueue.process(async (job) => {
 
     // ------------------- STATUS DETERMINATION LOGIC -------------------
 
-    // Priority 1: Check SL Hit first (can happen anytime, terminal state)
     if (isSlHit(alert, ltp)) {
       newStatus = STATUSES.SL_HIT;
-    } 
-    // Priority 2: Check Target Hit ONLY if entry was crossed
-    else if (isTargetHit(alert, ltp) && entryCrossedUpdated) {
+    } else if (isTargetHit(alert, ltp) && entryCrossedUpdated) {
       newStatus = STATUSES.TARGET_HIT;
-    } 
-    // Priority 3: Handle entry and running states
-    else {
-      // CRITICAL: Entry can only be crossed ONCE in an alert's lifecycle
-      // Once entry_crossed = true, ENTER status will NEVER be set again for this alert
-      
-      // Check if currently entering - ONLY if entry hasn't been crossed before
+    } else {
       if (isEnterCondition(alert, ltp) && !entryCrossedUpdated) {
         newStatus = STATUSES.ENTER;
-        // Mark entry as crossed - THIS HAPPENS ONLY ONCE
         entryCrossedUpdated = true;
         console.log(`🎯 FIRST TIME Entry crossed for ${alert.trading_symbol} at ₹${ltp}`);
-      } 
-      // Check if transitioning to running (after entry was crossed)
-      else if (entryCrossedUpdated && isRunningCondition(alert, previous, ltp)) {
+      } else if (entryCrossedUpdated && isRunningCondition(alert, previous, ltp)) {
         newStatus = STATUSES.RUNNING;
-      }
-      // Maintain enter/running state if already entered
-      else if ((oldStatus === STATUSES.ENTER || oldStatus === STATUSES.RUNNING) && entryCrossedUpdated) {
-        // Check if still in running range
+      } else if ((oldStatus === STATUSES.ENTER || oldStatus === STATUSES.RUNNING) && entryCrossedUpdated) {
         if (isStillRunning(alert, ltp)) {
           newStatus = STATUSES.RUNNING;
-        } 
-        // If price comes back to entry zone, stay in RUNNING (NOT ENTER again)
-        else if (isEnterCondition(alert, ltp)) {
-          newStatus = STATUSES.RUNNING; // FIXED: Don't go back to ENTER
-        } 
-        else {
-          // Maintain current state
+        } else if (isEnterCondition(alert, ltp)) {
+          newStatus = STATUSES.RUNNING;
+        } else {
           newStatus = oldStatus;
         }
-      }
-      // Check near entry (only if entry not crossed yet)
-      else if (isNearEntry(alert, ltp) && !entryCrossedUpdated) {
+      } else if (isNearEntry(alert, ltp) && !entryCrossedUpdated) {
         newStatus = STATUSES.NEAR_ENTRY;
-      } 
-      // Default to pending
-      else {
+      } else {
         newStatus = STATUSES.PENDING;
       }
     }
 
-    // Skip if nothing changed
     if (newStatus === alert.status && alert.last_ltp === ltp && entryCrossedUpdated === alert.entry_crossed) {
       continue;
     }
 
-    // Save new status and entry_crossed flag
     alert.status = newStatus;
     alert.last_ltp = ltp;
     alert.entry_crossed = entryCrossedUpdated;
     await alert.save();
 
-    // Log status change
     if (newStatus !== oldStatus) {
       console.log(`📊 ${alert.trading_symbol}: ${oldStatus} → ${newStatus} at ₹${ltp} (Entry crossed: ${entryCrossedUpdated})`);
     }
 
     // ------------------- NOTIFICATIONS -------------------
-    // CRITICAL: Only these statuses trigger notifications
+
     const emailTriggerStatuses = [
       STATUSES.SL_HIT,
       STATUSES.TARGET_HIT,
       STATUSES.ENTER,
     ];
 
-    // Send notifications ONLY on status CHANGE and for trigger statuses
-    // This prevents duplicate emails when user deletes and recreates alerts
-    if (
-      emailTriggerStatuses.includes(newStatus) &&
-      newStatus !== oldStatus
-    ) {
-      // ------------------- EMAIL NOTIFICATION -------------------
-      (async () => {
-        try {
-          const alertDetails = {
+    if (emailTriggerStatuses.includes(newStatus) && newStatus !== oldStatus) {
+      
+      // ------------------- EMAIL NOTIFICATION (QUEUE-BASED) -------------------
+      emailQueue.add(
+        {
+          userEmail: user.email,
+          alertDetails: {
             trading_symbol: alert.trading_symbol,
             status: newStatus,
             current_price: ltp,
@@ -256,23 +217,23 @@ alertQueue.process(async (job) => {
             trend: alert.trend,
             trade_type: alert.trade_type,
             triggered_at: new Date(),
-          };
-          
-          const result = await emailService.sendAlertNotification(user.email, alertDetails);
-          console.log(`✅ 📧 Email sent for ${alert.trading_symbol} to ${user.email} - Status: ${newStatus} - MessageID: ${result.messageId}`);
-        } catch (error) {
-          console.error(`❌ Failed to send email for alert ${alert._id} to ${user.email}:`, error.message);
-          if (process.env.NODE_ENV === 'production') {
-            // Add your monitoring/logging service here
-          }
+          },
+        },
+        {
+          priority: newStatus === STATUSES.SL_HIT || newStatus === STATUSES.TARGET_HIT ? 1 : 2,
+          removeOnComplete: true,
+          removeOnFail: false,
         }
-      })();
+      ).then(() => {
+        console.log(`📧 Email queued for ${alert.trading_symbol} to ${user.email} - Status: ${newStatus}`);
+      }).catch((error) => {
+        console.error(`❌ Failed to queue email for alert ${alert._id}:`, error.message);
+      });
 
       // ------------------- FIREBASE PUSH NOTIFICATION -------------------
       (async () => {
         try {
           if (user.deviceToken) {
-            // Status-specific notification configuration
             const notificationConfig = {
               slHit: {
                 title: '🛑 Stop Loss Hit',
@@ -379,7 +340,6 @@ alertQueue.process(async (job) => {
         timestamp: new Date().toISOString(),
       });
 
-      // Special event for terminal states
       if ([STATUSES.SL_HIT, STATUSES.TARGET_HIT].includes(newStatus) && newStatus !== oldStatus) {
         io.to(`user:${user._id.toString()}`).emit("alert_triggered", {
           alertId: alert._id,
@@ -408,7 +368,6 @@ setInterval(async () => {
 
 // ------------------- MIGRATION -------------------
 async function migrateAlerts() {
-  // Reset alerts with invalid statuses
   const alerts = await Alert.find({
     status: { $nin: Object.values(STATUSES) },
   });
@@ -419,7 +378,6 @@ async function migrateAlerts() {
     await alert.save();
   }
   
-  // Set entry_crossed for alerts already in ENTER, RUNNING, or TARGET_HIT states
   const enteredAlerts = await Alert.find({
     status: { $in: [STATUSES.ENTER, STATUSES.RUNNING, STATUSES.TARGET_HIT] }
   });
@@ -430,7 +388,6 @@ async function migrateAlerts() {
     }
   }
   
-  // Initialize entry_crossed field for alerts that don't have it
   const alertsWithoutField = await Alert.find({
     entry_crossed: { $exists: false }
   });

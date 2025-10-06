@@ -5,7 +5,7 @@ const http = require("http");
 const cors = require("cors");
 const cookieParser = require('cookie-parser');
 const session = require('express-session');
-const MongoStore = require('connect-mongo'); // NEW: Add MongoDB session store
+const MongoStore = require('connect-mongo');
 const config = require("./config/config");
 const socketService = require("./services/socketService");
 const authRoutes = require("./routes/authRoutes");
@@ -31,7 +31,7 @@ const server = http.createServer(app);
 
 // 0. Trust proxy - CRITICAL for Railway/Render/Heroku
 if (process.env.NODE_ENV === 'production') {
-  app.set('trust proxy', 1); // Trust first proxy
+  app.set('trust proxy', 1);
 }
 
 // 1. Cookie Parser - MUST come before routes
@@ -41,35 +41,33 @@ app.use(cookieParser());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// 3. CORS Configuration - UPDATED for credentials support
+// 3. CORS Configuration
 const corsOptions = {
-  origin: config.frontendBaseUrl || 'http://localhost:3000', // Specific origin, NOT wildcard
-  credentials: true, // Allow cookies to be sent
+  origin: config.frontendBaseUrl || 'http://localhost:3000',
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   exposedHeaders: ['set-cookie']
 };
 
 app.use(cors(corsOptions));
-
-// Handle preflight requests
 app.options('*', cors(corsOptions));
 
 // 4. Session Configuration with MongoDB Store
 app.use(session({
   secret: config.sessionSecret,
   resave: false,
-  saveUninitialized: false, // Changed to false for security
+  saveUninitialized: false,
   store: MongoStore.create({
     mongoUrl: config.mongoURI,
-    touchAfter: 24 * 3600, // Lazy session update (24 hours)
-    ttl: 24 * 60 * 60 // Session TTL (24 hours)
+    touchAfter: 24 * 3600,
+    ttl: 24 * 60 * 60
   }),
   cookie: { 
-    secure: process.env.NODE_ENV === 'production', // Only HTTPS in production
+    secure: process.env.NODE_ENV === 'production',
     httpOnly: true,
     sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    maxAge: 24 * 60 * 60 * 1000
   }
 }));
 
@@ -108,33 +106,37 @@ if (admin.apps.length === 0) {
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
   });
-  console.log("Firebase Admin initialized successfully.");
+  console.log("✅ Firebase Admin initialized successfully.");
 } else {
-  console.log("Firebase Admin already initialized.");
+  console.log("✅ Firebase Admin already initialized.");
 }
 
 // ===== DATABASE CONNECTION & SERVER STARTUP =====
 mongoose
   .connect(config.mongoURI)
   .then(async () => {
-    console.log("MongoDB connected");
+    console.log("✅ MongoDB connected");
 
     // Initialize AccessToken document if missing
     let tokenDoc = await AccessToken.findOne();
     if (!tokenDoc) {
       tokenDoc = new AccessToken({ token: '' });
       await tokenDoc.save();
-      console.log("Initialized empty AccessToken in DB.");
+      console.log("✅ Initialized empty AccessToken in DB.");
     }
 
     // Redis cleanup and preloading
     await redisService.cleanupStaleStocks();
     const symbols = await redisService.getAllGlobalStocks();
-    console.log("Preloading close prices for:", symbols);
+    console.log("📊 Preloading close prices for:", symbols);
     for (let symbol of symbols) {
       await fetchLastClose(symbol);
     }
-    console.log("Preloading complete.");
+    console.log("✅ Preloading complete.");
+
+    // ===== START EMAIL WORKER =====
+    console.log("📧 Starting email worker...");
+    require('./workers/emailWorker');
 
     // ===== CRON JOBS =====
 
@@ -145,9 +147,9 @@ mongoose
         for (let symbol of symbols) {
           await fetchLastClose(symbol);
         }
-        console.log(`[${new Date().toISOString()}] Periodic preload complete.`);
+        console.log(`[${new Date().toISOString()}] ✅ Periodic preload complete.`);
       } catch (err) {
-        console.error('Error in periodic preload:', err);
+        console.error('❌ Error in periodic preload:', err);
       }
     });
 
@@ -163,12 +165,12 @@ mongoose
           if (activeAlerts === 0 && (await redisService.getStockUserCount(symbol)) === 0) {
             await redisService.removePersistentStock(symbol);
             upstoxService.unsubscribe([symbol]); 
-            console.log(`Cleaned persistent stock: ${symbol}`);
+            console.log(`🧹 Cleaned persistent stock: ${symbol}`);
           }
         }
-        console.log(`[${new Date().toISOString()}] Cleaned up persistent stocks`);
+        console.log(`[${new Date().toISOString()}] ✅ Cleaned up persistent stocks`);
       } catch (err) {
-        console.error('Error in persistent stock cleanup:', err);
+        console.error('❌ Error in persistent stock cleanup:', err);
       }
     });
 
@@ -182,15 +184,16 @@ mongoose
     server.listen(config.port, () => {
       console.log(`
 ╔════════════════════════════════════════════════╗
-║   Server running on port ${config.port}              ║
-║   Environment: ${process.env.NODE_ENV || 'development'}                  ║
-║   Frontend URL: ${config.frontendBaseUrl}     ║
+║   🚀 Server running on port ${config.port}            ║
+║   📡 Environment: ${process.env.NODE_ENV || 'development'}                  ║
+║   🌐 Frontend URL: ${config.frontendBaseUrl}  ║
+║   📧 Email Worker: ACTIVE                      ║
 ╚════════════════════════════════════════════════╝
       `);
     });
   })
   .catch((err) => {
-    console.error("MongoDB connection error:", err);
+    console.error("❌ MongoDB connection error:", err);
     process.exit(1);
   });
 
@@ -203,7 +206,7 @@ app.use((req, res) => {
 
 // Global error handler
 app.use((err, req, res, next) => {
-  console.error('Global error handler:', err.stack);
+  console.error('❌ Global error handler:', err.stack);
   res.status(err.status || 500).json({ 
     msg: err.message || 'Server error',
     error: process.env.NODE_ENV === 'development' ? err.stack : undefined
@@ -212,33 +215,33 @@ app.use((err, req, res, next) => {
 
 // ===== GRACEFUL SHUTDOWN =====
 process.on('SIGTERM', async () => {
-  console.log('SIGTERM signal received: closing HTTP server');
+  console.log('⚠️ SIGTERM signal received: closing HTTP server');
   server.close(async () => {
-    console.log('HTTP server closed');
+    console.log('✅ HTTP server closed');
     await mongoose.connection.close();
-    console.log('MongoDB connection closed');
+    console.log('✅ MongoDB connection closed');
     process.exit(0);
   });
 });
 
 process.on('SIGINT', async () => {
-  console.log('SIGINT signal received: closing HTTP server');
+  console.log('⚠️ SIGINT signal received: closing HTTP server');
   server.close(async () => {
-    console.log('HTTP server closed');
+    console.log('✅ HTTP server closed');
     await mongoose.connection.close();
-    console.log('MongoDB connection closed');
+    console.log('✅ MongoDB connection closed');
     process.exit(0);
   });
 });
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err);
+  console.error('❌ Uncaught Exception:', err);
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
   process.exit(1);
 });
 
