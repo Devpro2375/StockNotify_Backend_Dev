@@ -1,24 +1,71 @@
-// utils/email.js
-
-
 const nodemailer = require('nodemailer');
 const config = require('../config/config');
 
-// FIXED: Use createTransport instead of createTransporter
+// PRODUCTION-GRADE TRANSPORTER CONFIGURATION
 const transporter = nodemailer.createTransport({
-  host: config.emailHost,
-  port: config.emailPort,
-  secure: false, // Use true for 465, false for other ports
+  host: 'smtp.gmail.com',
+  port: 587,
+  secure: false, // Use TLS
+  requireTLS: true, // Force TLS
   auth: {
     user: config.emailUser,
     pass: config.emailPass
-  }
+  },
+  // Connection pool settings for production
+  pool: true,
+  maxConnections: 5,
+  maxMessages: 100,
+  rateDelta: 1000,
+  rateLimit: 5,
+  // Timeout settings
+  connectionTimeout: 10000,
+  greetingTimeout: 10000,
+  socketTimeout: 20000,
+  // Debug mode
+  logger: process.env.NODE_ENV === 'development',
+  debug: process.env.NODE_ENV === 'development'
 });
 
-// EXISTING: Keep verification email functionality intact
+// VERIFY CONNECTION ON STARTUP
+let isTransporterReady = false;
+
+const verifyTransporter = async () => {
+  try {
+    await transporter.verify();
+    isTransporterReady = true;
+    console.log('✅ Email transporter verified and ready');
+    return true;
+  } catch (error) {
+    isTransporterReady = false;
+    console.error('❌ Email transporter verification failed:', error.message);
+    console.error('Check EMAIL_USER and EMAIL_PASS environment variables');
+    return false;
+  }
+};
+
+// Verify immediately on module load
+verifyTransporter().catch(err => {
+  console.error('Failed to verify email transporter on startup:', err);
+});
+
+// Re-verify every 5 minutes
+setInterval(() => {
+  verifyTransporter().catch(err => {
+    console.error('Periodic email transporter verification failed:', err);
+  });
+}, 5 * 60 * 1000);
+
+// EXISTING: Verification email functionality
 exports.sendVerificationEmail = async (to, verifyUrl) => {
+  if (!isTransporterReady) {
+    await verifyTransporter();
+    if (!isTransporterReady) {
+      throw new Error('Email service not available - SMTP connection failed');
+    }
+  }
+
   const mailOptions = {
-    from: config.emailUser,
+    from: `"Stock Notify" <${config.emailUser}>`,
     to,
     subject: 'Verify Your Email - Stock Notify',
     html: `
@@ -60,11 +107,29 @@ exports.sendVerificationEmail = async (to, verifyUrl) => {
       </html>
     `
   };
-  await transporter.sendMail(mailOptions);
+
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`✅ Verification email sent to ${to} - MessageID: ${info.messageId}`);
+    return info;
+  } catch (error) {
+    console.error(`❌ Failed to send verification email to ${to}:`, error.message);
+    throw error;
+  }
 };
 
-// NEW: Alert notification email functionality
-exports.sendAlertNotification = async (userEmail, alertDetails) => {
+// PRODUCTION-GRADE: Alert notification email with retry logic
+exports.sendAlertNotification = async (userEmail, alertDetails, retryCount = 0) => {
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY = 2000;
+
+  if (!isTransporterReady) {
+    await verifyTransporter();
+    if (!isTransporterReady) {
+      throw new Error('Email service not available - SMTP connection failed');
+    }
+  }
+
   const {
     trading_symbol,
     status,
@@ -77,7 +142,6 @@ exports.sendAlertNotification = async (userEmail, alertDetails) => {
     triggered_at
   } = alertDetails;
 
-  // Status configurations
   const statusConfig = {
     slHit: {
       title: 'Stop Loss Hit',
@@ -99,19 +163,11 @@ exports.sendAlertNotification = async (userEmail, alertDetails) => {
       icon: '🚀',
       message: 'Entry conditions have been satisfied!',
       advice: 'Consider entering your position as planned.'
-    },
-    running: {
-      title: 'Alert Running',
-      color: '#28a745',
-      icon: '📈',
-      message: 'Your position is now in profit!',
-      advice: 'Monitor closely for target achievement or trailing stop.'
     }
   };
 
   const configData = statusConfig[status] || statusConfig.enter;
 
-  // Helper functions
   const formatCurrency = (amount) => `₹${amount.toFixed(2)}`;
   const formatDateTime = (date) => new Date(date).toLocaleString('en-IN', {
     timeZone: 'Asia/Kolkata',
@@ -138,7 +194,7 @@ exports.sendAlertNotification = async (userEmail, alertDetails) => {
   const pnl = calculatePnL();
 
   const mailOptions = {
-    from: config.emailUser,
+    from: `"Stock Notify Alerts" <${config.emailUser}>`,
     to: userEmail,
     subject: `${configData.icon} ${trading_symbol} Alert: ${configData.title}`,
     html: `
@@ -362,10 +418,37 @@ exports.sendAlertNotification = async (userEmail, alertDetails) => {
   };
 
   try {
-    await transporter.sendMail(mailOptions);
-    console.log(`✅ Alert email sent successfully to ${userEmail} for ${trading_symbol}`);
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`✅ Alert email sent to ${userEmail} for ${trading_symbol} - MessageID: ${info.messageId}`);
+    return { success: true, messageId: info.messageId };
   } catch (error) {
-    console.error(`❌ Failed to send alert email to ${userEmail}:`, error.message);
+    console.error(`❌ Failed to send alert email (attempt ${retryCount + 1}/${MAX_RETRIES}) to ${userEmail}:`, error.message);
+    
+    if (retryCount < MAX_RETRIES && isRetryableError(error)) {
+      console.log(`🔄 Retrying email send in ${RETRY_DELAY}ms...`);
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+      return exports.sendAlertNotification(userEmail, alertDetails, retryCount + 1);
+    }
+    
     throw error;
   }
 };
+
+function isRetryableError(error) {
+  const retryableErrors = ['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EPIPE'];
+  return retryableErrors.some(errCode => error.code === errCode || error.message.includes(errCode));
+}
+
+process.on('SIGTERM', () => {
+  transporter.close();
+  console.log('Email transporter closed');
+});
+
+process.on('SIGINT', () => {
+  transporter.close();
+  console.log('Email transporter closed');
+});
+
+exports.transporter = transporter;
+exports.verifyTransporter = verifyTransporter;
+exports.isTransporterReady = () => isTransporterReady;
