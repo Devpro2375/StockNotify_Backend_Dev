@@ -22,14 +22,6 @@ const TRADE_TYPES = {
   BEARISH: "bearish",
 };
 
-// ------------------- NOTIFICATION TRIGGER STATUSES -------------------
-// CRITICAL: Only these statuses should trigger notifications
-const NOTIFICATION_TRIGGER_STATUSES = [
-  STATUSES.SL_HIT,
-  STATUSES.TARGET_HIT,
-  STATUSES.ENTER,
-];
-
 // ------------------- BULLISH HELPER FUNCTIONS -------------------
 
 function bullishSlHit(alert, ltp) {
@@ -146,34 +138,6 @@ const alertQueue = new Bull("alert-processing", {
   limiter: { max: 1000, duration: 1000 },
 });
 
-// ------------------- NOTIFICATION TRACKING -------------------
-// Track which alerts have already sent notifications for specific statuses
-// Key format: `alertId_status` -> timestamp
-const notificationHistory = new Map();
-
-// Clean up old notification history entries every 30 minutes
-setInterval(() => {
-  const thirtyMinutesAgo = Date.now() - 30 * 60 * 1000;
-  for (const [key, timestamp] of notificationHistory.entries()) {
-    if (timestamp < thirtyMinutesAgo) {
-      notificationHistory.delete(key);
-    }
-  }
-}, 30 * 60 * 1000);
-
-// Helper function to check if notification was already sent
-function hasNotificationBeenSent(alertId, status) {
-  const key = `${alertId}_${status}`;
-  return notificationHistory.has(key);
-}
-
-// Helper function to mark notification as sent
-function markNotificationAsSent(alertId, status) {
-  const key = `${alertId}_${status}`;
-  notificationHistory.set(key, Date.now());
-  console.log(`📝 Marked notification as sent: ${key}`);
-}
-
 // ------------------- QUEUE PROCESSOR -------------------
 alertQueue.process(async (job) => {
   const { symbol, tick } = job.data;
@@ -210,14 +174,13 @@ alertQueue.process(async (job) => {
     } 
     // Priority 3: Handle entry and running states
     else {
-      // CRITICAL STOCK MARKET LOGIC:
-      // Once entry is crossed (entry_crossed = true), ENTER status can only be triggered ONCE
-      // After that, price movements only affect RUNNING status, not ENTER status
+      // CRITICAL: Entry can only be crossed ONCE in an alert's lifecycle
+      // Once entry_crossed = true, ENTER status will NEVER be set again for this alert
       
-      // Check if currently entering (crossing entry zone) - ONLY if entry hasn't been crossed before
+      // Check if currently entering - ONLY if entry hasn't been crossed before
       if (isEnterCondition(alert, ltp) && !entryCrossedUpdated) {
         newStatus = STATUSES.ENTER;
-        // Mark entry as crossed - THIS HAPPENS ONLY ONCE IN ALERT LIFECYCLE
+        // Mark entry as crossed - THIS HAPPENS ONLY ONCE
         entryCrossedUpdated = true;
         console.log(`🎯 FIRST TIME Entry crossed for ${alert.trading_symbol} at ₹${ltp}`);
       } 
@@ -231,12 +194,12 @@ alertQueue.process(async (job) => {
         if (isStillRunning(alert, ltp)) {
           newStatus = STATUSES.RUNNING;
         } 
-        // If price comes back to entry zone, maintain RUNNING (not ENTER again)
+        // If price comes back to entry zone, stay in RUNNING (NOT ENTER again)
         else if (isEnterCondition(alert, ltp)) {
           newStatus = STATUSES.RUNNING; // FIXED: Don't go back to ENTER
         } 
         else {
-          // Maintain current state if no other conditions met
+          // Maintain current state
           newStatus = oldStatus;
         }
       }
@@ -244,7 +207,7 @@ alertQueue.process(async (job) => {
       else if (isNearEntry(alert, ltp) && !entryCrossedUpdated) {
         newStatus = STATUSES.NEAR_ENTRY;
       } 
-      // Default to pending if no conditions met
+      // Default to pending
       else {
         newStatus = STATUSES.PENDING;
       }
@@ -267,42 +230,45 @@ alertQueue.process(async (job) => {
     }
 
     // ------------------- NOTIFICATIONS -------------------
-    // CRITICAL: Only trigger notifications for specific status changes AND first time only
-    const shouldNotify = 
-      NOTIFICATION_TRIGGER_STATUSES.includes(newStatus) && 
-      newStatus !== oldStatus &&
-      !hasNotificationBeenSent(alert._id, newStatus); // PREVENT DUPLICATES
+    // CRITICAL: Only these statuses trigger notifications
+    const emailTriggerStatuses = [
+      STATUSES.SL_HIT,
+      STATUSES.TARGET_HIT,
+      STATUSES.ENTER,
+    ];
 
-    if (shouldNotify) {
-      // Mark this notification as sent IMMEDIATELY to prevent any race conditions
-      markNotificationAsSent(alert._id, newStatus);
-
-      const alertDetails = {
-        trading_symbol: alert.trading_symbol,
-        status: newStatus,
-        current_price: ltp,
-        entry_price: alert.entry_price,
-        stop_loss: alert.stop_loss,
-        target_price: alert.target_price,
-        trend: alert.trend,
-        trade_type: alert.trade_type,
-        triggered_at: new Date(),
-      };
-
+    // Send notifications ONLY on status CHANGE and for trigger statuses
+    // This prevents duplicate emails when user deletes and recreates alerts
+    if (
+      emailTriggerStatuses.includes(newStatus) &&
+      newStatus !== oldStatus
+    ) {
       // ------------------- EMAIL NOTIFICATION -------------------
       (async () => {
         try {
+          const alertDetails = {
+            trading_symbol: alert.trading_symbol,
+            status: newStatus,
+            current_price: ltp,
+            entry_price: alert.entry_price,
+            stop_loss: alert.stop_loss,
+            target_price: alert.target_price,
+            trend: alert.trend,
+            trade_type: alert.trade_type,
+            triggered_at: new Date(),
+          };
+          
           const result = await emailService.sendAlertNotification(user.email, alertDetails);
           console.log(`✅ 📧 Email sent for ${alert.trading_symbol} to ${user.email} - Status: ${newStatus} - MessageID: ${result.messageId}`);
         } catch (error) {
           console.error(`❌ Failed to send email for alert ${alert._id} to ${user.email}:`, error.message);
           if (process.env.NODE_ENV === 'production') {
-            // Add your monitoring/logging service here (Sentry, LogRocket, etc.)
+            // Add your monitoring/logging service here
           }
         }
       })();
 
-      // ------------------- FIREBASE PUSH NOTIFICATION WITH CLICK ACTION & ICON -------------------
+      // ------------------- FIREBASE PUSH NOTIFICATION -------------------
       (async () => {
         try {
           if (user.deviceToken) {
@@ -346,36 +312,32 @@ alertQueue.process(async (job) => {
                 trade_type: alert.trade_type,
                 entry_crossed: entryCrossedUpdated.toString(),
                 timestamp: new Date().toISOString(),
-                // CLICK ACTION: Redirect to alerts page
-                click_action: 'FLUTTER_NOTIFICATION_CLICK', // For Flutter apps
-                url: 'https://stock-notify-frontend-dev.vercel.app/dashboard/alerts', // For web
+                click_action: 'FLUTTER_NOTIFICATION_CLICK',
+                url: 'https://stock-notify-frontend-dev.vercel.app/dashboard/alerts',
               },
-              // WEB PUSH CONFIGURATION WITH CLICK ACTION
               webpush: {
                 fcmOptions: {
-                  link: 'https://stock-notify-frontend-dev.vercel.app/dashboard/alerts', // Web click redirect
+                  link: 'https://stock-notify-frontend-dev.vercel.app/dashboard/alerts',
                 },
                 notification: {
-                  icon: 'https://stock-notify-frontend-dev.vercel.app/favicon.ico', // Your favicon
+                  icon: 'https://stock-notify-frontend-dev.vercel.app/favicon.ico',
                   badge: 'https://stock-notify-frontend-dev.vercel.app/favicon.ico',
-                  tag: `${alert._id}_${newStatus}`, // Prevents duplicates on web
+                  tag: `${alert._id}_${newStatus}`,
                   requireInteraction: false,
                 }
               },
-              // ANDROID CONFIGURATION WITH CLICK ACTION & ICON
               android: {
                 priority: notifConfig.priority,
                 notification: {
                   channelId: 'stock_alerts',
                   priority: 'high',
                   sound: 'default',
-                  tag: `${alert._id}_${newStatus}`, // Prevents duplicate notifications
-                  clickAction: 'https://stock-notify-frontend-dev.vercel.app/dashboard/alerts', // Android click redirect
-                  icon: 'notification_icon', // Your app notification icon (must be in Android app)
-                  color: '#1976d2', // Notification icon color
+                  tag: `${alert._id}_${newStatus}`,
+                  clickAction: 'https://stock-notify-frontend-dev.vercel.app/dashboard/alerts',
+                  icon: 'notification_icon',
+                  color: '#1976d2',
                 }
               },
-              // IOS (APNS) CONFIGURATION WITH CLICK ACTION
               apns: {
                 payload: {
                   aps: {
@@ -385,27 +347,25 @@ alertQueue.process(async (job) => {
                       title: notifConfig.title,
                       body: notifConfig.body,
                     },
-                    'thread-id': alert._id.toString(), // Groups notifications on iOS
-                    'category': 'STOCK_ALERT_CATEGORY', // For iOS action handling
+                    'thread-id': alert._id.toString(),
+                    'category': 'STOCK_ALERT_CATEGORY',
                   }
                 },
                 fcmOptions: {
-                  imageUrl: 'https://stock-notify-frontend-dev.vercel.app/favicon.ico', // iOS notification image
+                  imageUrl: 'https://stock-notify-frontend-dev.vercel.app/favicon.ico',
                 }
               },
             });
             
-            console.log(`✅ 🔔 Firebase notification sent for ${alert.trading_symbol} - Status: ${newStatus} - Will redirect to alerts page on click`);
+            console.log(`✅ 🔔 Firebase notification sent for ${alert.trading_symbol} - Status: ${newStatus}`);
           }
         } catch (err) {
           console.error(`❌ Firebase push notification failed for alert ${alert._id}:`, err.message);
-          // Don't throw - notification failure shouldn't block processing
         }
       })();
     }
 
     // ------------------- SOCKET.IO LIVE UPDATE -------------------
-    // Socket updates happen on every price/status change (not just notifications)
     const io = ioInstance.getIo();
     if (io) {
       io.to(`user:${user._id.toString()}`).emit("alert_status_updated", {
@@ -419,7 +379,7 @@ alertQueue.process(async (job) => {
         timestamp: new Date().toISOString(),
       });
 
-      // Special event for terminal states (only on status change)
+      // Special event for terminal states
       if ([STATUSES.SL_HIT, STATUSES.TARGET_HIT].includes(newStatus) && newStatus !== oldStatus) {
         io.to(`user:${user._id.toString()}`).emit("alert_triggered", {
           alertId: alert._id,
@@ -475,7 +435,6 @@ async function migrateAlerts() {
     entry_crossed: { $exists: false }
   });
   for (const alert of alertsWithoutField) {
-    // If status is ENTER, RUNNING, or TARGET_HIT, set to true, otherwise false
     alert.entry_crossed = [STATUSES.ENTER, STATUSES.RUNNING, STATUSES.TARGET_HIT].includes(alert.status);
     await alert.save();
   }
@@ -489,5 +448,4 @@ module.exports = {
   migrateAlerts,
   STATUSES,
   TRADE_TYPES,
-  NOTIFICATION_TRIGGER_STATUSES,
 };
