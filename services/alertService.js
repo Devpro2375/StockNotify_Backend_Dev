@@ -1,3 +1,5 @@
+// services/socketService.js
+
 const Alert = require("../models/Alert");
 const User = require("../models/User");
 const redisService = require("./redisService");
@@ -48,6 +50,11 @@ function bullishNearEntry(alert, ltp) {
   return ltp > alert.entry_price && diffPercent <= 1;
 }
 
+function bullishStillRunning(alert, ltp) {
+  // Still running if between entry and target (and above SL)
+  return ltp >= alert.entry_price && ltp < alert.target_price && ltp > alert.stop_loss;
+}
+
 // ------------------- BEARISH HELPER FUNCTIONS -------------------
 
 function bearishSlHit(alert, ltp) {
@@ -72,6 +79,11 @@ function bearishNearEntry(alert, ltp) {
   // Within 1% BELOW entry, but not yet entered
   const diffPercent = ((alert.entry_price - ltp) / alert.entry_price) * 100;
   return ltp < alert.entry_price && diffPercent <= 1;
+}
+
+function bearishStillRunning(alert, ltp) {
+  // Still running if between target and SL (not hit either)
+  return ltp > alert.target_price && ltp < alert.stop_loss;
 }
 
 // ------------------- UNIFIED HELPER FUNCTIONS -------------------
@@ -112,14 +124,10 @@ function isNearEntry(alert, ltp) {
 }
 
 function isStillRunning(alert, ltp) {
-  // Check if position should remain in RUNNING state
   if (alert.trade_type === TRADE_TYPES.BEARISH) {
-    // Bearish: still running if between target and SL (not hit either)
-    return ltp > alert.target_price && ltp < alert.stop_loss;
-  } else {
-    // Bullish: still running if between entry and target (and above SL)
-    return ltp >= alert.entry_price && ltp < alert.target_price && ltp > alert.stop_loss;
+    return bearishStillRunning(alert, ltp);
   }
+  return bullishStillRunning(alert, ltp);
 }
 
 // ------------------- QUEUE SETUP -------------------
@@ -154,52 +162,73 @@ alertQueue.process(async (job) => {
     const previous = alert.last_ltp ?? alert.cmp ?? alert.entry_price;
     let newStatus = alert.status ?? STATUSES.PENDING;
     const oldStatus = alert.status;
+    let entryCrossedUpdated = alert.entry_crossed || false;
 
     // ------------------- STATUS DETERMINATION LOGIC -------------------
 
-    // Priority 1: Check terminal states first
+    // Priority 1: Check SL Hit first (can happen anytime, no entry validation required)
     if (isSlHit(alert, ltp)) {
       newStatus = STATUSES.SL_HIT;
-    } else if (isTargetHit(alert, ltp)) {
+    } 
+    // Priority 2: Check Target Hit ONLY if entry was crossed
+    else if (isTargetHit(alert, ltp) && entryCrossedUpdated) {
       newStatus = STATUSES.TARGET_HIT;
-    } else {
-      // Priority 2: Handle ENTER and RUNNING states
-      if (oldStatus === STATUSES.ENTER || oldStatus === STATUSES.RUNNING) {
-        // Once entered, check if still running
+    } 
+    // Priority 3: Handle entry and running states
+    else {
+      // Check if currently entering (crossing entry zone)
+      if (isEnterCondition(alert, ltp)) {
+        newStatus = STATUSES.ENTER;
+        // Mark entry as crossed when entering
+        if (!entryCrossedUpdated) {
+          entryCrossedUpdated = true;
+          console.log(`✅ Entry crossed for ${alert.trading_symbol} at ${ltp}`);
+        }
+      } 
+      // Check if transitioning to running (after entry was crossed)
+      else if (entryCrossedUpdated && isRunningCondition(alert, previous, ltp)) {
+        newStatus = STATUSES.RUNNING;
+      }
+      // Maintain enter/running state if already entered
+      else if ((oldStatus === STATUSES.ENTER || oldStatus === STATUSES.RUNNING) && entryCrossedUpdated) {
+        // Check if still in running range
         if (isStillRunning(alert, ltp)) {
           newStatus = STATUSES.RUNNING;
-        } else if (isRunningCondition(alert, previous, ltp)) {
-          // Transition from ENTER to RUNNING
-          newStatus = STATUSES.RUNNING;
-        } else {
-          // Stay in current state if conditions not met
+        } 
+        // Check if re-entering
+        else if (isEnterCondition(alert, ltp)) {
+          newStatus = STATUSES.ENTER;
+        } 
+        else {
+          // Maintain current state if no other conditions met
           newStatus = oldStatus;
         }
-      } else {
-        // Priority 3: Check for new entry or near-entry
-        if (isRunningCondition(alert, previous, ltp)) {
-          // Price crossed entry threshold - immediately RUNNING
-          newStatus = STATUSES.RUNNING;
-        } else if (isEnterCondition(alert, ltp)) {
-          // Price in entry zone
-          newStatus = STATUSES.ENTER;
-        } else if (isNearEntry(alert, ltp)) {
-          // Price approaching entry
-          newStatus = STATUSES.NEAR_ENTRY;
-        } else {
-          // No conditions met
-          newStatus = STATUSES.PENDING;
-        }
+      }
+      // Check near entry (only if entry not crossed yet)
+      else if (isNearEntry(alert, ltp) && !entryCrossedUpdated) {
+        newStatus = STATUSES.NEAR_ENTRY;
+      } 
+      // Default to pending if no conditions met
+      else {
+        newStatus = STATUSES.PENDING;
       }
     }
 
     // Skip if nothing changed
-    if (newStatus === alert.status && alert.last_ltp === ltp) continue;
+    if (newStatus === alert.status && alert.last_ltp === ltp && entryCrossedUpdated === alert.entry_crossed) {
+      continue;
+    }
 
-    // Save new status
+    // Save new status and entry_crossed flag
     alert.status = newStatus;
     alert.last_ltp = ltp;
+    alert.entry_crossed = entryCrossedUpdated;
     await alert.save();
+
+    // Log status change
+    if (newStatus !== oldStatus) {
+      console.log(`📊 ${alert.trading_symbol}: ${oldStatus} → ${newStatus} at ₹${ltp} (Entry crossed: ${entryCrossedUpdated})`);
+    }
 
     // ------------------- NOTIFICATIONS -------------------
 
@@ -247,6 +276,7 @@ alertQueue.process(async (job) => {
               status: newStatus,
               symbol: symbol,
               price: ltp.toString(),
+              entry_crossed: entryCrossedUpdated.toString(),
             },
           });
         }
@@ -264,6 +294,7 @@ alertQueue.process(async (job) => {
         symbol,
         price: ltp,
         trade_type: alert.trade_type,
+        entry_crossed: entryCrossedUpdated,
         timestamp: new Date().toISOString(),
       });
 
@@ -275,6 +306,7 @@ alertQueue.process(async (job) => {
           price: ltp,
           status: newStatus,
           trade_type: alert.trade_type,
+          entry_crossed: entryCrossedUpdated,
           timestamp: new Date().toISOString(),
         });
       }
@@ -293,15 +325,41 @@ setInterval(async () => {
 
 // ------------------- MIGRATION -------------------
 async function migrateAlerts() {
+  // Reset alerts with invalid statuses
   const alerts = await Alert.find({
     status: { $nin: Object.values(STATUSES) },
   });
   for (const alert of alerts) {
     alert.status = STATUSES.PENDING;
     alert.last_ltp = null;
+    alert.entry_crossed = false;
     await alert.save();
   }
+  
+  // Set entry_crossed for alerts already in ENTER, RUNNING, or TARGET_HIT states
+  const enteredAlerts = await Alert.find({
+    status: { $in: [STATUSES.ENTER, STATUSES.RUNNING, STATUSES.TARGET_HIT] }
+  });
+  for (const alert of enteredAlerts) {
+    if (!alert.entry_crossed) {
+      alert.entry_crossed = true;
+      await alert.save();
+    }
+  }
+  
+  // Initialize entry_crossed field for alerts that don't have it
+  const alertsWithoutField = await Alert.find({
+    entry_crossed: { $exists: false }
+  });
+  for (const alert of alertsWithoutField) {
+    // If status is ENTER, RUNNING, or TARGET_HIT, set to true, otherwise false
+    alert.entry_crossed = [STATUSES.ENTER, STATUSES.RUNNING, STATUSES.TARGET_HIT].includes(alert.status);
+    await alert.save();
+  }
+  
   console.log(`✅ Migrated ${alerts.length} alerts to pending.`);
+  console.log(`✅ Set entry_crossed for ${enteredAlerts.length} entered alerts.`);
+  console.log(`✅ Initialized entry_crossed for ${alertsWithoutField.length} alerts.`);
 }
 
 module.exports = {

@@ -1,3 +1,5 @@
+// controllers/alertsController.js
+
 const Alert = require("../models/Alert");
 const redisService = require("../services/redisService");
 const upstoxService = require("../services/upstoxService");
@@ -17,7 +19,7 @@ exports.getAlerts = async (req, res) => {
 // Add a new alert
 exports.addAlert = async (req, res) => {
   try {
-    // Validate required fields (add more as needed)
+    // Validate required fields
     const {
       trading_symbol,
       instrument_key,
@@ -47,15 +49,16 @@ exports.addAlert = async (req, res) => {
       level,
       sector,
       notes,
-      status: STATUSES.PENDING  // Default to pending
+      status: STATUSES.PENDING,
+      entry_crossed: false  // NEW: Initialize as false for new alerts
     });
 
     await newAlert.save();
 
-    // NEW: Add to persistent stocks for offline processing
+    // Add to persistent stocks for offline processing
     await redisService.addPersistentStock(newAlert.instrument_key);
 
-    // NEW: Subscribe if not already (for immediate tick flow)
+    // Subscribe if not already (for immediate tick flow)
     if (await redisService.shouldSubscribe(newAlert.instrument_key)) {
       upstoxService.subscribe([newAlert.instrument_key]);
       console.log(`🌐 Subscribed to ${newAlert.instrument_key} for new alert`);
@@ -81,7 +84,7 @@ exports.removeAlert = async (req, res) => {
 
     await Alert.findByIdAndDelete(id);
 
-    // NEW: Check if symbol can be removed from persistent
+    // Check if symbol can be removed from persistent
     const activeAlerts = await Alert.countDocuments({
       instrument_key: removedAlert.instrument_key,
       status: { $nin: [STATUSES.SL_HIT, STATUSES.TARGET_HIT] }

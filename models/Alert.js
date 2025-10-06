@@ -6,7 +6,7 @@ const alertSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
   trading_symbol: { type: String, required: true },
   instrument_key: { type: String, required: true },
-  cmp: { type: Number },  // Optional, as per your update
+  cmp: { type: Number },
   entry_price: { type: Number, required: true },
   stop_loss: { type: Number, required: true },
   target_price: { type: Number, required: true },
@@ -21,10 +21,11 @@ const alertSchema = new mongoose.Schema({
   notes: { type: String },
   status: {
     type: String,
-    enum: ["pending", "nearEntry", "enter", "running", "slHit", "targetHit"], // Updated enum with new values
-    default: "pending", // Default to pending for new alerts
+    enum: ["pending", "nearEntry", "enter", "running", "slHit", "targetHit"],
+    default: "pending",
   },
   last_ltp: { type: Number, default: null },
+  entry_crossed: { type: Boolean, default: false }, // NEW: Track if entry was ever crossed
   created_at: { type: Date, default: Date.now },
 });
 
