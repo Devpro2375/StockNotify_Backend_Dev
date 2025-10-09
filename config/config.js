@@ -11,8 +11,9 @@ module.exports = {
   upstoxRestUrl: "https://api.upstox.com/v3",
   port: process.env.PORT || 5000,
   upstoxApiKey: process.env.UPSTOX_API_KEY,
-  googleClientId: '1005747042622-u76tg782hcrkabcmj1d46l2pusr4p8vn.apps.googleusercontent.com',
-  googleClientSecret: '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s',
+
+  googleClientId: process.env.GOOGLE_CLIENT_ID,  
+  googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,  
   googleCallbackURL: process.env.GOOGLE_AUTH_CALLBACK,
   emailHost: 'smtp.gmail.com',
   emailPort: 587,
