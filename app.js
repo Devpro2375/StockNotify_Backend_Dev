@@ -23,6 +23,7 @@ const { STATUSES } = require("./services/socketService");
 const admin = require('firebase-admin');
 const adminRoutes = require("./routes/adminRoutes");
 const AccessToken = require("./models/AccessToken");
+const { updateInstruments } = require('./services/instrumentService');
 
 const app = express();
 const server = http.createServer(app);
@@ -64,9 +65,10 @@ app.use(session({
     ttl: 24 * 60 * 60
   }),
   cookie: { 
-    secure: process.env.NODE_ENV === 'production',
+    // FIXED: Proper cookie settings for local development
+    secure: process.env.NODE_ENV === 'production' && process.env.USE_HTTPS === 'true',
     httpOnly: true,
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
     maxAge: 24 * 60 * 60 * 1000
   }
 }));
@@ -140,7 +142,7 @@ mongoose
 
     // ===== CRON JOBS =====
 
-    // Periodic preload of close prices (every 5 minutes)
+    // 1. Periodic preload of close prices (every 5 minutes)
     cron.schedule('*/5 * * * *', async () => {
       try {
         const symbols = await redisService.getAllGlobalStocks();
@@ -153,7 +155,7 @@ mongoose
       }
     });
 
-    // Cleanup persistent stocks (every 5 minutes)
+    // 2. Cleanup persistent stocks (every 5 minutes)
     cron.schedule('*/5 * * * *', async () => {
       try {
         const persistent = await redisService.getPersistentStocks();
@@ -174,6 +176,21 @@ mongoose
       }
     });
 
+    // 3. Daily instrument update at 6:30 AM IST
+    cron.schedule('30 6 * * *', async () => {
+      try {
+        console.log('🔄 Starting scheduled daily instrument update...');
+        const result = await updateInstruments();
+        console.log(`[${new Date().toISOString()}] ✅ Instrument update complete: ${result.count} instruments (deleted ${result.deleted} old)`);
+      } catch (err) {
+        console.error(`[${new Date().toISOString()}] ❌ Scheduled instrument update failed:`, err.message);
+      }
+    }, {
+      timezone: "Asia/Kolkata"
+    });
+
+    console.log('✅ Instrument update cron scheduled at 6:30 AM IST daily');
+
     // Start alert queue processor
     require("./services/alertService");
 
@@ -188,6 +205,7 @@ mongoose
 ║   📡 Environment: ${process.env.NODE_ENV || 'development'}                  ║
 ║   🌐 Frontend URL: ${config.frontendBaseUrl}  ║
 ║   📧 Email Worker: ACTIVE                      ║
+║   ⏰ Cron Jobs: 3 ACTIVE                       ║
 ╚════════════════════════════════════════════════╝
       `);
     });

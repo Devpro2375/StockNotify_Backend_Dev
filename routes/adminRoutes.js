@@ -4,6 +4,7 @@ const config = require('../config/config');
 const AccessToken = require('../models/AccessToken');
 const axios = require('axios');
 const upstoxService = require('../services/upstoxService');
+const { updateInstruments } = require('../services/instrumentService');
 
 // Middleware to check if admin is logged in
 const isAdminLoggedIn = (req, res, next) => {
@@ -105,40 +106,49 @@ router.get('/', isAdminLoggedIn, async (req, res) => {
         <head>
           <title>Admin Dashboard</title>
           <style>
-            body { font-family: Arial, sans-serif; background: #121212; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+            body { font-family: Arial, sans-serif; background: #121212; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 1rem; }
             .container { background: #1e1e1e; padding: 2rem; border-radius: 12px; box-shadow: 0 8px 16px rgba(0,0,0,0.4); width: 100%; max-width: 500px; }
             h1 { text-align: center; color: #E50914; font-size: 2rem; margin-bottom: 1.5rem; }
-            p { margin: 0.5rem 0; color: #FFD369; font-size: 1rem; }
-            form { display: flex; flex-direction: column; }
+            p { margin: 0.5rem 0; color: #FFD369; font-size: 1rem; word-break: break-all; }
+            form { display: flex; flex-direction: column; margin-bottom: 0; }
             label { margin-bottom: 0.5rem; color: #FFD369; font-weight: bold; }
             input { padding: 0.75rem; margin-bottom: 1rem; border: 1px solid #333; border-radius: 6px; background: #2a2a2a; color: #fff; font-size: 1rem; }
             button { padding: 0.75rem; background: #E50914; color: #fff; border: none; border-radius: 6px; cursor: pointer; transition: background 0.3s, transform 0.2s; margin-bottom: 1rem; font-size: 1rem; font-weight: bold; }
             button:hover { background: #c40812; transform: translateY(-2px); }
+            .btn-secondary { background: #FFD369; color: #121212; }
+            .btn-secondary:hover { background: #ffc107; transform: translateY(-2px); }
             .message { padding: 1rem; background: #2a2a2a; border-radius: 6px; margin-bottom: 1rem; text-align: center; display: none; font-size: 1rem; }
             .success { background: #1b5e20; }
             .error { background: #b71c1c; }
-            a { color: #FFD369; text-decoration: none; font-size: 1rem; }
+            a { color: #FFD369; text-decoration: none; font-size: 1rem; display: block; text-align: center; margin-top: 1rem; }
             a:hover { text-decoration: underline; }
             #connectionStatus { display: flex; align-items: center; justify-content: center; margin: 1rem 0; font-size: 1.1rem; font-weight: bold; }
             .status-dot { width: 12px; height: 12px; border-radius: 50%; margin-right: 0.5rem; }
             .connected .status-dot { background: #4caf50; }
             .not-connected .status-dot { background: #f44336; }
-            @media (max-width: 600px) { .container { padding: 1.5rem; } }
+            @media (max-width: 600px) { .container { padding: 1.5rem; } h1 { font-size: 1.5rem; } }
           </style>
         </head>
         <body>
           <div class="container">
             <h1>Admin Dashboard</h1>
-            <p>Current Token: ${currentToken}</p>
+            <p>Current Token: ${currentToken ? currentToken.substring(0, 20) + '...' : 'Not set'}</p>
             <p>Last Updated: ${lastUpdated}</p>
             <div id="connectionStatus"><div class="status-dot"></div> Checking...</div>
             <div id="message" class="message"></div>
+            
             <form method="POST" action="/admin/update-token" onsubmit="return validateForm()">
               <label for="token">New Access Token:</label>
               <input type="text" id="token" name="token" required aria-label="New Access Token">
               <button type="submit">Update Token</button>
             </form>
+            
             <button onclick="testConnection(true)">Test Connection</button>
+            
+            <form method="POST" action="/admin/update-instruments" style="margin: 0;" onsubmit="return confirm('This will download and update all instruments from Upstox exchanges (NSE, BSE, NFO, MCX, BFO, CDS). This may take 1-2 minutes. Continue?');">
+              <button type="submit" class="btn-secondary">🔄 Update Instruments Database</button>
+            </form>
+            
             <a href="/admin/logout" onclick="return confirm('Are you sure you want to logout?');">Logout</a>
           </div>
           <script>
@@ -147,7 +157,7 @@ router.get('/', isAdminLoggedIn, async (req, res) => {
               msg.textContent = text;
               msg.className = 'message ' + type;
               msg.style.display = 'block';
-              setTimeout(() => { msg.style.display = 'none'; }, 5000);
+              setTimeout(() => { msg.style.display = 'none'; }, 8000);
             }
 
             function validateForm() {
@@ -161,12 +171,10 @@ router.get('/', isAdminLoggedIn, async (req, res) => {
 
             async function updateStatus(showMsg) {
               try {
-                // Test REST token
                 const tokenResponse = await fetch('/admin/test-token', { method: 'POST' });
                 if (!tokenResponse.ok) throw new Error('Token test failed');
                 const tokenResult = await tokenResponse.json();
 
-                // Test WS status
                 const wsResponse = await fetch('/admin/ws-status');
                 if (!wsResponse.ok) throw new Error('WS status check failed');
                 const wsResult = await wsResponse.json();
@@ -195,21 +203,20 @@ router.get('/', isAdminLoggedIn, async (req, res) => {
               await updateStatus(showMsg);
             }
 
-            // Auto-update on load and every 10 seconds
             window.addEventListener('load', () => {
               updateStatus(false);
               setInterval(() => updateStatus(false), 10000);
             });
 
-            // Handle query params for messages
             const urlParams = new URLSearchParams(window.location.search);
-            if (urlParams.has('success')) showMessage(urlParams.get('success'), 'success');
-            if (urlParams.has('error')) showMessage(urlParams.get('error'), 'error');
+            if (urlParams.has('success')) showMessage(decodeURIComponent(urlParams.get('success')), 'success');
+            if (urlParams.has('error')) showMessage(decodeURIComponent(urlParams.get('error')), 'error');
           </script>
         </body>
       </html>
     `);
   } catch (err) {
+    console.error('Error loading dashboard:', err);
     res.status(500).send('Error loading dashboard.');
   }
 });
@@ -225,6 +232,20 @@ router.post('/update-token', isAdminLoggedIn, async (req, res) => {
   } catch (err) {
     console.error('Error updating token or reconnecting:', err);
     res.redirect(`/admin?error=Failed to update token or reconnect WS: ${err.message}`);
+  }
+});
+
+// POST /admin/update-instruments - Update instruments database
+router.post('/update-instruments', isAdminLoggedIn, async (req, res) => {
+  try {
+    console.log('🚀 Manual instrument update triggered by admin');
+    const result = await updateInstruments();
+    
+    // Redirect back to admin dashboard with success message
+    res.redirect(`/admin?success=Updated ${result.count} instruments successfully! (Deleted ${result.deleted} old records)`);
+  } catch (error) {
+    console.error('❌ Update error:', error);
+    res.redirect(`/admin?error=Update failed: ${error.message}`);
   }
 });
 
@@ -264,4 +285,3 @@ router.get('/logout', (req, res) => {
 });
 
 module.exports = router;
-
