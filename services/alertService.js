@@ -1,7 +1,8 @@
 const Alert = require("../models/Alert");
 const User = require("../models/User");
 const redisService = require("./redisService");
-const emailQueue = require("../queues/emailQueue"); // NEW: Import email queue
+const emailQueue = require("../queues/emailQueue");
+const telegramQueue = require("../queues/telegramQueue"); // NEW
 const Bull = require("bull");
 const config = require("../config/config");
 const admin = require("firebase-admin");
@@ -216,6 +217,7 @@ alertQueue.process(async (job) => {
             target_price: alert.target_price,
             trend: alert.trend,
             trade_type: alert.trade_type,
+            level: alert.level,
             triggered_at: new Date(),
           },
         },
@@ -324,6 +326,41 @@ alertQueue.process(async (job) => {
           console.error(`❌ Firebase push notification failed for alert ${alert._id}:`, err.message);
         }
       })();
+
+      // =============== NEW: TELEGRAM NOTIFICATION (QUEUE-BASED) ===============
+      if (user.telegramChatId && user.telegramEnabled) {
+        telegramQueue.add(
+          {
+            chatId: user.telegramChatId,
+            alertDetails: {
+              trading_symbol: alert.trading_symbol,
+              status: newStatus,
+              current_price: ltp,
+              entry_price: alert.entry_price,
+              stop_loss: alert.stop_loss,
+              target_price: alert.target_price,
+              trend: alert.trend,
+              trade_type: alert.trade_type,
+              level: alert.level,
+              triggered_at: new Date(),
+            },
+          },
+          {
+            priority: newStatus === STATUSES.SL_HIT || newStatus === STATUSES.TARGET_HIT ? 1 : 2,
+            removeOnComplete: true,
+            removeOnFail: false,
+            attempts: 3,
+            backoff: {
+              type: 'exponential',
+              delay: 2000
+            }
+          }
+        ).then(() => {
+          console.log(`📱 Telegram queued for ${alert.trading_symbol} to chat ${user.telegramChatId} - Status: ${newStatus}`);
+        }).catch((error) => {
+          console.error(`❌ Failed to queue Telegram for alert ${alert._id}:`, error.message);
+        });
+      }
     }
 
     // ------------------- SOCKET.IO LIVE UPDATE -------------------
@@ -405,4 +442,5 @@ module.exports = {
   migrateAlerts,
   STATUSES,
   TRADE_TYPES,
+  alertQueue, // Export for external use if needed
 };

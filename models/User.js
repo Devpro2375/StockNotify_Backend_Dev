@@ -10,7 +10,15 @@ const userSchema = new mongoose.Schema({
   verificationToken: { type: String },
   verificationTokenExpires: { type: Date },
   deviceToken: { type: String },
-  refreshToken: { type: String } // New: For persistent sessions
+  refreshToken: { type: String }, // New: For persistent sessions
+
+
+  // NEW: Telegram fields
+  telegramChatId: { type: String, default: null, index: true },
+  telegramUsername: { type: String, default: null },
+  telegramEnabled: { type: Boolean, default: false },
+  telegramLinkedAt: { type: Date, default: null },
+  
 }, {
   timestamps: true
 });

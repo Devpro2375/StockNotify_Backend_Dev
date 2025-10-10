@@ -14,6 +14,7 @@ const marketDataRoutes = require("./routes/marketDataRoutes");
 const redisService = require("./services/redisService");
 const { fetchLastClose } = require("./services/upstoxService");
 const alertsRoutes = require("./routes/alerts");
+const telegramRoutes = require("./routes/telegramRoutes"); // NEW
 const passport = require('passport');
 require('./config/passport');
 const cron = require('node-cron');
@@ -24,6 +25,7 @@ const admin = require('firebase-admin');
 const adminRoutes = require("./routes/adminRoutes");
 const AccessToken = require("./models/AccessToken");
 const { updateInstruments } = require('./services/instrumentService');
+const telegramService = require('./services/telegramService'); // NEW
 
 const app = express();
 const server = http.createServer(app);
@@ -65,7 +67,6 @@ app.use(session({
     ttl: 24 * 60 * 60
   }),
   cookie: { 
-    // FIXED: Proper cookie settings for local development
     secure: process.env.NODE_ENV === 'production' && process.env.USE_HTTPS === 'true',
     httpOnly: true,
     sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
@@ -83,10 +84,19 @@ app.use("/api/auth", authRoutes);
 app.use("/api/watchlist", watchlistRoutes);
 app.use("/api/market-data", marketDataRoutes);
 app.use("/api/alerts", alertsRoutes);
+app.use("/api/telegram", telegramRoutes); // NEW: Telegram routes
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    services: {
+      mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+      telegram: telegramService.isInitialized ? 'active' : 'inactive',
+      redis: 'active' // Assuming Redis is connected if server is running
+    }
+  });
 });
 
 // ===== FIREBASE ADMIN INITIALIZATION =====
@@ -135,6 +145,10 @@ mongoose
       await fetchLastClose(symbol);
     }
     console.log("✅ Preloading complete.");
+
+    // ===== INITIALIZE TELEGRAM BOT =====
+    console.log("📱 Initializing Telegram Bot...");
+    await telegramService.init();
 
     // ===== START EMAIL WORKER =====
     console.log("📧 Starting email worker...");
@@ -198,16 +212,29 @@ mongoose
     socketService.init(server);
 
     // Start server
-    server.listen(config.port, () => {
+    server.listen(config.port, async () => {
+      // Get Telegram bot info
+      const botInfo = await telegramService.getBotInfo();
+      const telegramStatus = telegramService.isInitialized ? 'ACTIVE' : 'INACTIVE';
+      const botUsername = botInfo ? `@${botInfo.username}` : 'N/A';
+
       console.log(`
 ╔════════════════════════════════════════════════╗
 ║   🚀 Server running on port ${config.port}            ║
 ║   📡 Environment: ${process.env.NODE_ENV || 'development'}                  ║
 ║   🌐 Frontend URL: ${config.frontendBaseUrl}  ║
 ║   📧 Email Worker: ACTIVE                      ║
+║   🔔 Firebase Push: ACTIVE                     ║
+║   📱 Telegram Bot: ${telegramStatus.padEnd(26)}║
+║   ${botInfo ? `🤖 Bot Username: ${botUsername.padEnd(26)}` : ''}║
 ║   ⏰ Cron Jobs: 3 ACTIVE                       ║
 ╚════════════════════════════════════════════════╝
       `);
+
+      if (botInfo) {
+        console.log(`📱 Telegram Bot Ready: @${botInfo.username}`);
+        console.log(`🔗 Users can start chat: https://t.me/${botInfo.username}`);
+      }
     });
   })
   .catch((err) => {

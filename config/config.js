@@ -21,7 +21,8 @@ module.exports = {
   emailPass: process.env.EMAIL_PASS,
   baseUrl: process.env.BASE_URL,
   frontendBaseUrl: process.env.FRONTEND_BASE_URL,
-
+  telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
+  telegramWebhookUrl: process.env.TELEGRAM_WEBHOOK_URL || null,
   sessionSecret: process.env.SESSION_SECRET,
   adminPassword: process.env.ADMIN_PASSWORD,
   firebaseServiceAccount: process.env.FIREBASE_SERVICE_ACCOUNT
