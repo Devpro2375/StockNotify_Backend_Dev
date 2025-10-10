@@ -33,9 +33,7 @@ const server = http.createServer(app);
 // ===== MIDDLEWARE SETUP =====
 
 // 0. Trust proxy - CRITICAL for Railway/Render/Heroku
-if (process.env.NODE_ENV === 'production') {
-  app.set('trust proxy', 1);
-}
+app.set('trust proxy', 1); // Always trust proxy, not just in production
 
 // 1. Cookie Parser - MUST come before routes
 app.use(cookieParser());
@@ -44,39 +42,62 @@ app.use(cookieParser());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// 3. CORS Configuration
+// 3. CORS Configuration - UPDATED FOR PRODUCTION
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:3001',
+  process.env.FRONTEND_URL,
+  'https://your-frontend-domain.vercel.app', // Add your actual frontend domain
+];
+
 const corsOptions = {
-  origin: config.frontendBaseUrl || 'http://localhost:3000',
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(null, true); // For development, allow all. Remove in strict production
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  exposedHeaders: ['set-cookie']
+  allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],
+  exposedHeaders: ['set-cookie'],
+  optionsSuccessStatus: 200
 };
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
-// 4. Session Configuration with MongoDB Store
+// 4. Session Configuration - UPDATED FOR PRODUCTION
 app.use(session({
-  secret: config.sessionSecret,
+  secret: config.sessionSecret || process.env.SESSION_SECRET || 'your-secret-key-change-in-production',
   resave: false,
   saveUninitialized: false,
   store: MongoStore.create({
     mongoUrl: config.mongoURI,
     touchAfter: 24 * 3600,
-    ttl: 24 * 60 * 60
+    ttl: 7 * 24 * 60 * 60, // 7 days
+    crypto: {
+      secret: config.sessionSecret || process.env.SESSION_SECRET || 'your-secret-key'
+    }
   }),
   cookie: { 
-    secure: process.env.NODE_ENV === 'production' && process.env.USE_HTTPS === 'true',
+    secure: process.env.NODE_ENV === 'production', // HTTPS in production
     httpOnly: true,
-    sameSite: process.env.NODE_ENV === 'production' ? 'strict' : 'lax',
-    maxAge: 24 * 60 * 60 * 1000
-  }
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax', // 'none' for cross-domain
+    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    domain: process.env.NODE_ENV === 'production' ? undefined : undefined // Let browser handle it
+  },
+  proxy: true // Important for Railway/Vercel
 }));
 
 // 5. Passport Configuration
 app.use(passport.initialize());
 app.use(passport.session());
+
 
 // ===== ROUTES =====
 app.use("/admin", adminRoutes);
