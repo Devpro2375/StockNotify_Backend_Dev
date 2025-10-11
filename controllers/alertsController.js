@@ -9,7 +9,24 @@ const { STATUSES } = require("../services/socketService");
 exports.getAlerts = async (req, res) => {
   try {
     const alerts = await Alert.find({ user: req.user.id }).sort({ created_at: -1 });
-    res.json({ alerts });
+    
+    // FIXED: Populate cmp field with last close prices (matching watchlist logic)
+    const alertsWithCmp = await Promise.all(
+      alerts.map(async (alert) => {
+        let lastPrice = await redisService.getLastClosePrice(alert.instrument_key);
+        if (!lastPrice) {
+          lastPrice = await upstoxService.fetchLastClose(alert.instrument_key);
+        }
+        
+        // Update the alert's cmp field with the fetched price
+        const alertObj = alert.toObject();
+        alertObj.cmp = lastPrice?.close ?? lastPrice ?? alert.cmp ?? null;
+        
+        return alertObj;
+      })
+    );
+    
+    res.json({ alerts: alertsWithCmp });
   } catch (err) {
     console.error("Error fetching alerts:", err);
     res.status(500).json({ message: "Server error" });
