@@ -90,7 +90,7 @@ exports.cleanupUser = async (userId) => {
 
 exports.setLastTick = async (symbol, tick) => {
   await client.hSet("stock:lastTick", symbol, JSON.stringify(tick));
-  await client.expire("stock:lastTick", 3600); // Expire after 1 hour to prevent OOM
+  await client.expire("stock:lastTick", 86400); // Expire after 1 hour to prevent OOM
 };
 
 exports.getLastTick = async (symbol) => {
