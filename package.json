@@ -5,8 +5,7 @@
   "main": "app.js",
   "scripts": {
     "start": "NODE_ENV=production node app.js",
-    "dev": "nodemon app.js",
-    "railway:build": "npm install && pip install -r python-scripts/requirements.txt"
+    "dev": "nodemon app.js"
   },
   "keywords": [
     "stock",
@@ -47,6 +46,7 @@
     "node-cron": "^4.2.1",
     "node-telegram-bot-api": "^0.66.0",
     "nodemailer": "^7.0.5",
+    "otplib": "^12.0.1",
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
     "protobufjs": "^7.3.2",

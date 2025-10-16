@@ -11,6 +11,7 @@ const socketService = require("./services/socketService");
 const authRoutes = require("./routes/authRoutes");
 const watchlistRoutes = require("./routes/watchlistRoutes");
 const marketDataRoutes = require("./routes/marketDataRoutes");
+const tokenRoutes = require("./routes/tokenRoutes");
 const redisService = require("./services/redisService");
 const { fetchLastClose } = require("./services/upstoxService");
 const alertsRoutes = require("./routes/alerts");
@@ -29,9 +30,6 @@ const telegramService = require('./services/telegramService'); // NEW
 
 const app = express();
 const server = http.createServer(app);
-const tokenRoutes = require("./routes/tokenRoutes");
-
-// Add this with other routes
 
 // ===== MIDDLEWARE SETUP =====
 
@@ -109,7 +107,9 @@ app.use("/api/watchlist", watchlistRoutes);
 app.use("/api/market-data", marketDataRoutes);
 app.use("/api/alerts", alertsRoutes);
 app.use("/api/telegram", telegramRoutes); // NEW: Telegram routes
-app.use("/api/token", tokenRoutes);
+app.use("/api/token", tokenRoutes); // ✅ CORRECT!
+
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ 
@@ -169,6 +169,38 @@ mongoose
       await fetchLastClose(symbol);
     }
     console.log("✅ Preloading complete.");
+
+
+        // ===== UPSTOX TOKEN AUTO-REFRESH CRON =====
+    const UpstoxTokenRefresh = require('./services/upstoxTokenRefresh');
+    
+    // Run daily at 6:30 AM IST (0:30 UTC)
+ // 🧪 TESTING: Run at 1:05 PM IST
+cron.schedule('5 13 * * *', async () => {  // ✅ 13:05 = 1:05 PM
+  console.log(`\n[${ new Date().toISOString()}] 🧪 TEST: Automatic token refresh triggered`);
+  console.log(`Current IST time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n`);
+  
+  try {
+    const refresher = new UpstoxTokenRefresh();
+    const result = await refresher.refreshToken();
+    
+    if (result.success) {
+      console.log(`[${new Date().toISOString()}] ✅ Token refresh successful - expires at ${result.expiresAt}`);
+    } else {
+      console.error(`[${new Date().toISOString()}] ❌ Token refresh failed:`, result.error);
+    }
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] ❌ Token refresh error:`, err.message);
+  }
+}, {
+  timezone: "Asia/Kolkata"
+});
+
+console.log('🧪 TEST: Token refresh cron scheduled at 1:05 PM IST');
+
+    
+    console.log('✅ Upstox token refresh cron scheduled at 6:00 AM IST daily');
+
 
     // ===== INITIALIZE TELEGRAM BOT =====
     console.log("📱 Initializing Telegram Bot...");

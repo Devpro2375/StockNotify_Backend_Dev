@@ -97,7 +97,7 @@ async function fetchLastClose(instrumentKey) {
     const accessToken = await getAccessTokenFromDB(); // NEW: Fetch from DB
     const today = new Date().toISOString().slice(0, 10);
     const res = await axios.get(
-      `${config.upstoxRestUrl}/historical/v3/${instrumentKey}/days/1`,
+      // `${config.upstoxRestUrl}/historical/v3/${instrumentKey}/days/1`,
       {
         params: { to_date: today },
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -105,7 +105,7 @@ async function fetchLastClose(instrumentKey) {
     );
     const candles = res.data.data.candles;
     if (!candles.length) {
-      console.warn(`No historical data for ${instrumentKey} on ${today}`);
+      // console.warn(`No historical data for ${instrumentKey} on ${today}`);
       return null;
     }
     const last = candles[candles.length - 1];
@@ -120,7 +120,7 @@ async function fetchLastClose(instrumentKey) {
     await redisService.setLastClosePrice(instrumentKey, payload);
     return payload;
   } catch (err) {
-    console.error(`Error fetching historical for ${instrumentKey}:`, err.message);
+    // console.error(`Error fetching historical for ${instrumentKey}:`, err.message);
     if (err.response?.status === 404) {
       console.warn("Symbol may be invalid or no data available. Skipping.");
     } else if (err.response?.status === 401) {

@@ -89,4 +89,40 @@ router.get('/health', async (req, res) => {
   }
 });
 
+// Manual token refresh endpoint (for testing)
+router.post('/refresh', async (req, res) => {
+  try {
+    console.log('\n╔════════════════════════════════════════════════╗');
+    console.log('║   🧪 MANUAL TOKEN REFRESH TRIGGERED           ║');
+    console.log('╚════════════════════════════════════════════════╝\n');
+    
+    const UpstoxTokenRefresh = require('../services/upstoxTokenRefresh');
+    const refresher = new UpstoxTokenRefresh();
+    const result = await refresher.refreshToken();
+    
+    if (result.success) {
+      console.log('✅ Manual refresh completed successfully!\n');
+      res.json({
+        success: true,
+        message: 'Token refreshed successfully',
+        expires_at: result.expiresAt,
+        note: result.note
+      });
+    } else {
+      console.error('❌ Manual refresh failed!\n');
+      res.status(500).json({
+        success: false,
+        error: result.error
+      });
+    }
+  } catch (err) {
+    console.error('❌ Manual refresh error:', err.message, '\n');
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+// Export ONCE at the end
 module.exports = router;
