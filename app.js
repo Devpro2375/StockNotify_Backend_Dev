@@ -176,7 +176,7 @@ mongoose
     
     // Run daily at 6:30 AM IST (0:30 UTC)
  // 🧪 TESTING: Run at 1:05 PM IST
-cron.schedule('17 13 * * *', async () => {  // ✅ 13:05 = 1:05 PM
+cron.schedule('20 13 * * *', async () => {  // ✅ 13:05 = 1:05 PM
   console.log(`\n[${ new Date().toISOString()}] 🧪 TEST: Automatic token refresh triggered`);
   console.log(`Current IST time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n`);
   
