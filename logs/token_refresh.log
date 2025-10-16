@@ -1,0 +1,88 @@
+2025-10-16 11:34:35,261 [INFO] ======================================================================
+2025-10-16 11:34:35,285 [INFO]    Railway Environment: production
+2025-10-16 11:34:35,285 [INFO]    Railway Service: StockNotify_Backend_Dev
+2025-10-16 11:34:35,286 [INFO] ======================================================================
+2025-10-16 11:40:57,169 [INFO] ======================================================================
+2025-10-16 11:40:57,170 [INFO] [START] Upstox Token Refresh Started
+2025-10-16 11:40:57,170 [INFO]         Railway Environment: local
+2025-10-16 11:40:57,170 [INFO]         Railway Service: N/A
+2025-10-16 11:40:57,172 [INFO]         Platform: win32
+2025-10-16 11:40:57,172 [INFO] ======================================================================
+2025-10-16 11:40:57,172 [INFO] [DB] Connecting to MongoDB: watchlist
+2025-10-16 11:41:02,712 [INFO] [OK] MongoDB connected: watchlist
+2025-10-16 11:41:02,712 [INFO] [AUTH] Initializing Upstox TOTP client...
+2025-10-16 11:41:02,713 [INFO] [OK] Upstox TOTP client initialized
+2025-10-16 11:41:02,713 [INFO] [REFRESH] Generating new access token...
+2025-10-16 11:41:04,325 [ERROR] [ERROR] Upstox API error: UDAPI100068: Check your 'client_id' and 'redirect_uri'; one or both are incorrect.
+💡 Tip: Verify your client_id and redirect_uri in your .env file match your Upstox developer app settings.
+2025-10-16 11:41:04,406 [INFO] [DB] MongoDB connection closed
+2025-10-16 11:41:04,407 [INFO] [EXIT] Exiting with code 1
+2025-10-16 11:45:33,160 [INFO] ======================================================================
+2025-10-16 11:45:33,161 [INFO] [START] Upstox Token Refresh Started
+2025-10-16 11:45:33,161 [INFO]         Railway Environment: local
+2025-10-16 11:45:33,161 [INFO]         Railway Service: N/A
+2025-10-16 11:45:33,161 [INFO]         Platform: win32
+2025-10-16 11:45:33,161 [INFO] ======================================================================
+2025-10-16 11:45:33,161 [INFO] [DB] Connecting to MongoDB: watchlist
+2025-10-16 11:45:39,220 [INFO] [OK] MongoDB connected: watchlist
+2025-10-16 11:45:39,221 [INFO] [AUTH] Initializing Upstox TOTP client...
+2025-10-16 11:45:39,222 [INFO] [OK] Upstox TOTP client initialized
+2025-10-16 11:45:39,222 [INFO] [REFRESH] Generating new access token...
+2025-10-16 11:45:43,545 [ERROR] [ERROR] Upstox API error: UDAPI100500: Only 5 attempts left. Please enter a valid input.
+💡 Tip: Check your UPSTOX_TOTP_SECRET in .env - it should be the TOTP secret key from your Upstox app setup. Make sure your system time is correct.
+2025-10-16 11:45:43,623 [INFO] [DB] MongoDB connection closed
+2025-10-16 11:45:43,623 [INFO] [EXIT] Exiting with code 1
+2025-10-16 11:47:33,329 [INFO] ======================================================================
+2025-10-16 11:47:33,329 [INFO] [START] Upstox Token Refresh Started
+2025-10-16 11:47:33,329 [INFO]         Railway Environment: local
+2025-10-16 11:47:33,329 [INFO]         Railway Service: N/A
+2025-10-16 11:47:33,329 [INFO]         Platform: win32
+2025-10-16 11:47:33,329 [INFO] ======================================================================
+2025-10-16 11:47:33,330 [INFO] [DB] Connecting to MongoDB: watchlist
+2025-10-16 11:47:42,288 [INFO] [OK] MongoDB connected: watchlist
+2025-10-16 11:47:42,288 [INFO] [AUTH] Initializing Upstox TOTP client...
+2025-10-16 11:47:42,288 [INFO] [OK] Upstox TOTP client initialized
+2025-10-16 11:47:42,289 [INFO] [REFRESH] Generating new access token...
+2025-10-16 11:47:46,137 [ERROR] [ERROR] Upstox API error: UDAPI100500: Only 4 attempts left. Please enter a valid input.
+💡 Tip: Check your UPSTOX_TOTP_SECRET in .env - it should be the TOTP secret key from your Upstox app setup. Make sure your system time is correct.
+2025-10-16 11:47:46,159 [INFO] [DB] MongoDB connection closed
+2025-10-16 11:47:46,160 [INFO] [EXIT] Exiting with code 1
+2025-10-16 11:48:33,617 [INFO] ======================================================================
+2025-10-16 11:48:33,617 [INFO] [START] Upstox Token Refresh Started
+2025-10-16 11:48:33,617 [INFO]         Railway Environment: local
+2025-10-16 11:48:33,617 [INFO]         Railway Service: N/A
+2025-10-16 11:48:33,618 [INFO]         Platform: win32
+2025-10-16 11:48:33,618 [INFO] ======================================================================
+2025-10-16 11:48:33,618 [INFO] [DB] Connecting to MongoDB: watchlist
+2025-10-16 11:48:42,351 [INFO] [OK] MongoDB connected: watchlist
+2025-10-16 11:48:42,352 [INFO] [AUTH] Initializing Upstox TOTP client...
+2025-10-16 11:48:42,353 [INFO] [OK] Upstox TOTP client initialized
+2025-10-16 11:48:42,353 [INFO] [REFRESH] Generating new access token...
+2025-10-16 11:48:46,930 [ERROR] [ERROR] Upstox API error: UDAPI100500: Only 3 attempts left. Please enter a valid input.
+💡 Tip: Check your UPSTOX_TOTP_SECRET in .env - it should be the TOTP secret key from your Upstox app setup. Make sure your system time is correct.
+2025-10-16 11:48:46,948 [INFO] [DB] MongoDB connection closed
+2025-10-16 11:48:46,948 [INFO] [EXIT] Exiting with code 1
+2025-10-16 11:53:44,801 [INFO] ======================================================================
+2025-10-16 11:53:44,802 [INFO] [START] Upstox Token Refresh Started
+2025-10-16 11:53:44,802 [INFO]         Railway Environment: local
+2025-10-16 11:53:44,802 [INFO]         Railway Service: N/A
+2025-10-16 11:53:44,802 [INFO]         Platform: win32
+2025-10-16 11:53:44,802 [INFO] ======================================================================
+2025-10-16 11:53:44,802 [INFO] [DB] Connecting to MongoDB: watchlist
+2025-10-16 11:53:53,525 [INFO] [OK] MongoDB connected: watchlist
+2025-10-16 11:53:53,526 [INFO] [AUTH] Initializing Upstox TOTP client...
+2025-10-16 11:53:53,527 [INFO] [OK] Upstox TOTP client initialized
+2025-10-16 11:53:53,527 [INFO] [REFRESH] Generating new access token...
+2025-10-16 11:54:00,307 [INFO] [OK] Token generated successfully
+2025-10-16 11:54:00,307 [INFO]      User: DEVESH MUKESH BADGUJAR (8GATLG)
+2025-10-16 11:54:00,308 [INFO]      Email: badgujardevesh25@gmail.com
+2025-10-16 11:54:00,308 [INFO]      Broker: UPSTOX
+2025-10-16 11:54:00,332 [INFO] [OK] Token saved to MongoDB
+2025-10-16 11:54:00,332 [INFO]      Collection: accesstokens
+2025-10-16 11:54:00,332 [INFO]      Expires at: 2025-10-17 05:54:00 UTC
+2025-10-16 11:54:00,332 [INFO] ======================================================================
+2025-10-16 11:54:00,332 [INFO] [SUCCESS] Token Refresh Completed!
+2025-10-16 11:54:00,333 [INFO]           Execution time: 15.53 seconds
+2025-10-16 11:54:00,333 [INFO] ======================================================================
+2025-10-16 11:54:00,356 [INFO] [DB] MongoDB connection closed
+2025-10-16 11:54:00,357 [INFO] [EXIT] Exiting with code 0

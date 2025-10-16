@@ -5,7 +5,8 @@
   "main": "app.js",
   "scripts": {
     "start": "NODE_ENV=production node app.js",
-    "dev": "nodemon app.js"
+    "dev": "nodemon app.js",
+    "railway:build": "npm install && pip install -r python-scripts/requirements.txt"
   },
   "keywords": [
     "stock",

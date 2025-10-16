@@ -29,6 +29,9 @@ const telegramService = require('./services/telegramService'); // NEW
 
 const app = express();
 const server = http.createServer(app);
+const tokenRoutes = require("./routes/tokenRoutes");
+
+// Add this with other routes
 
 // ===== MIDDLEWARE SETUP =====
 
@@ -106,7 +109,7 @@ app.use("/api/watchlist", watchlistRoutes);
 app.use("/api/market-data", marketDataRoutes);
 app.use("/api/alerts", alertsRoutes);
 app.use("/api/telegram", telegramRoutes); // NEW: Telegram routes
-
+app.use("/api/token", tokenRoutes);
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ 
