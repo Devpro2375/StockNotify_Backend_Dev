@@ -1,15 +1,19 @@
 [phases.setup]
-nixPkgs = ['nodejs-18_x', 'python312', 'python312Packages.pip']
+nixPkgs = [
+  'nodejs-18_x',
+  'python312',
+  'python312Packages.pip',
+  'gcc',
+  'stdenv.cc.cc.lib'
+]
 
 [phases.install]
 cmds = [
   'npm ci',
   'python3 -m venv /opt/venv',
+  '. /opt/venv/bin/activate && pip install --upgrade pip',
   '. /opt/venv/bin/activate && pip install -r python-scripts/requirements.txt'
 ]
 
-[phases.build]
-cmds = []
-
 [start]
-cmd = '. /opt/venv/bin/activate && node app.js'
+cmd = 'export LD_LIBRARY_PATH=$(find /nix/store -name "libstdc++.so.6" -exec dirname {} \\; | head -n 1):$LD_LIBRARY_PATH && . /opt/venv/bin/activate && node app.js'
