@@ -4,8 +4,12 @@ nixPkgs = ['nodejs-18_x', 'python311', 'python311Packages.pip']
 [phases.install]
 cmds = [
   'npm ci',
-  'pip install -r python-scripts/requirements.txt'
+  'python3 -m venv /opt/venv',
+  '. /opt/venv/bin/activate && pip install -r python-scripts/requirements.txt'
 ]
 
+[phases.build]
+cmds = []
+
 [start]
-cmd = 'node app.js'
+cmd = '. /opt/venv/bin/activate && node app.js'
