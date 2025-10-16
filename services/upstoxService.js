@@ -130,6 +130,7 @@ async function fetchLastClose(instrumentKey) {
   }
 }
 
+
 async function connect() {
   return new Promise(async (resolve, reject) => {
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
