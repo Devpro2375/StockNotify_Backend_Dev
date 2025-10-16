@@ -1,5 +1,3 @@
-// services/telegramService.js
-
 const TelegramBot = require('node-telegram-bot-api');
 const config = require('../config/config');
 const User = require('../models/User');

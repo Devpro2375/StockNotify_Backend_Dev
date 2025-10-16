@@ -1,133 +1,96 @@
-// services/redisService.js - REFACTORED & OPTIMIZED
+// services/redisService.js
+
 
 const redis = require("redis");
 const config = require("../config/config");
 
 const client = redis.createClient({
-  socket: { 
-    host: config.redisHost, 
-    port: config.redisPort,
-    reconnectStrategy: (retries) => Math.min(retries * 50, 500)
-  },
+  socket: { host: config.redisHost, port: config.redisPort },
   password: config.redisPassword
 });
-
-client.on("error", (err) => console.error("Redis Client Error:", err.message));
-client.on("connect", () => console.log("✅ Redis connected"));
+client.on("error", (err) => console.log("Redis Client Error", err));
 client.connect();
 
-// Memory monitoring (optimized interval)
+// New: Monitor memory usage periodically
 setInterval(async () => {
   try {
     const info = await client.info('memory');
-    const usedMemory = info.match(/used_memory_human:(.+)/)?.[1];
-    console.log(`Redis Memory: ${usedMemory}`);
+    console.log('Redis Memory Usage:', info);
   } catch (err) {
-    console.error('Memory monitoring error:', err.message);
+    console.error('Memory monitoring error:', err);
   }
-}, 300000); // Every 5 minutes instead of 1
+}, 60000); // Every minute
 
-// ------------------- PIPELINE HELPERS -------------------
-async function executePipeline(commands) {
-  const pipeline = client.multi();
-  commands.forEach(cmd => pipeline[cmd.method](...cmd.args));
-  return await pipeline.exec();
-}
-
-// ------------------- USER-STOCK MANAGEMENT -------------------
 exports.addUserToStock = async (userId, symbol) => {
   const userIdStr = String(userId);
-  await executePipeline([
-    { method: 'sAdd', args: [`stock:${symbol}:users`, userIdStr] },
-    { method: 'sAdd', args: ["global:stocks", symbol] },
-    { method: 'sAdd', args: [`user:${userIdStr}:stocks`, symbol] }
-  ]);
+  const pipeline = client.multi();
+  pipeline.sAdd(`stock:${symbol}:users`, userIdStr);
+  pipeline.sAdd("global:stocks", symbol);
+  pipeline.sAdd(`user:${userIdStr}:stocks`, symbol);
+  await pipeline.exec();
 };
 
 exports.removeUserFromStock = async (userId, symbol) => {
   const userIdStr = String(userId);
-  await executePipeline([
-    { method: 'sRem', args: [`stock:${symbol}:users`, userIdStr] },
-    { method: 'sRem', args: [`user:${userIdStr}:stocks`, symbol] }
-  ]);
+  const pipeline = client.multi();
+  pipeline.sRem(`stock:${symbol}:users`, userIdStr);
+  pipeline.sRem(`user:${userIdStr}:stocks`, symbol);
+  await pipeline.exec();
 };
 
-exports.getStockUserCount = async (symbol) => 
-  await client.sCard(`stock:${symbol}:users`);
+exports.getStockUserCount = async (symbol) =>
+  client.sCard(`stock:${symbol}:users`);
 
 exports.removeStockFromGlobal = async (symbol) => {
-  await executePipeline([
-    { method: 'sRem', args: ["global:stocks", symbol] },
-    { method: 'del', args: [`stock:${symbol}:users`] }
-  ]);
+  const pipeline = client.multi();
+  pipeline.sRem("global:stocks", symbol);
+  pipeline.del(`stock:${symbol}:users`);
+  await pipeline.exec();
 };
 
-exports.getUserStocks = async (userId) => 
-  await client.sMembers(`user:${String(userId)}:stocks`);
+exports.getUserStocks = async (userId) => {
+  const userIdStr = String(userId);
+  return await client.sMembers(`user:${userIdStr}:stocks`);
+};
 
-exports.getAllGlobalStocks = async () => 
-  await client.sMembers("global:stocks");
+exports.getAllGlobalStocks = async () => await client.sMembers("global:stocks");
 
-exports.getStockUsers = async (symbol) => 
-  await client.sMembers(`stock:${symbol}:users`);
+exports.getStockUsers = async (symbol) => await client.sMembers(`stock:${symbol}:users`);
 
-// ------------------- CLEANUP OPERATIONS -------------------
 exports.cleanupStaleStocks = async () => {
   const all = await exports.getAllGlobalStocks();
-  const commands = [];
-  
+  const pipeline = client.multi();
   for (const sym of all) {
     if (await exports.getStockUserCount(sym) === 0) {
-      commands.push(
-        { method: 'sRem', args: ["global:stocks", sym] },
-        { method: 'del', args: [`stock:${sym}:users`] }
-      );
+      pipeline.sRem("global:stocks", sym);
+      pipeline.del(`stock:${sym}:users`);
     }
   }
-  
-  if (commands.length > 0) {
-    await executePipeline(commands);
-  }
+  await pipeline.exec();
 };
 
 exports.cleanupUser = async (userId) => {
   const userIdStr = String(userId);
   const userStocks = await exports.getUserStocks(userId);
-  const Alert = require("../models/Alert");
-  const commands = [];
-
+  const pipeline = client.multi();
   for (const sym of userStocks) {
-    const alerts = await Alert.find({ 
-      user: userId, 
-      instrument_key: sym, 
-      status: "active" 
-    }).lean().limit(1);
-    
+    const alerts = await require("../models/Alert").find({ user: userId, instrument_key: sym, status: "active" });
     if (alerts.length > 0) continue;
 
-    commands.push(
-      { method: 'sRem', args: [`stock:${sym}:users`, userIdStr] },
-      { method: 'sRem', args: [`user:${userIdStr}:stocks`, sym] }
-    );
-
+    pipeline.sRem(`stock:${sym}:users`, userIdStr);
+    pipeline.sRem(`user:${userIdStr}:stocks`, sym);
     if (await exports.getStockUserCount(sym) === 0) {
       require("./upstoxService").unsubscribe([sym]);
-      commands.push(
-        { method: 'sRem', args: ["global:stocks", sym] },
-        { method: 'del', args: [`stock:${sym}:users`] }
-      );
+      pipeline.sRem("global:stocks", sym);
+      pipeline.del(`stock:${sym}:users`);
     }
   }
-
-  if (commands.length > 0) {
-    await executePipeline(commands);
-  }
+  await pipeline.exec();
 };
 
-// ------------------- TICK & PRICE CACHING -------------------
 exports.setLastTick = async (symbol, tick) => {
   await client.hSet("stock:lastTick", symbol, JSON.stringify(tick));
-  await client.expire("stock:lastTick", 86400); // Expire after 24 hour to prevent OOM
+  await client.expire("stock:lastTick", 86400); // Expire after 1 hour to prevent OOM
 };
 
 exports.getLastTick = async (symbol) => {
@@ -137,7 +100,7 @@ exports.getLastTick = async (symbol) => {
 
 exports.setLastClosePrice = async (symbol, data) => {
   await client.hSet("stock:lastClose", symbol, JSON.stringify(data));
-  await client.expire("stock:lastClose", 86400);
+  await client.expire("stock:lastClose", 86400); // Expire after 1 day
 };
 
 exports.getLastClosePrice = async (symbol) => {
@@ -145,22 +108,20 @@ exports.getLastClosePrice = async (symbol) => {
   return v ? JSON.parse(v) : null;
 };
 
-// ------------------- PERSISTENT STOCKS -------------------
-exports.addPersistentStock = async (symbol) => 
+exports.addPersistentStock = async (symbol) => {
   await client.sAdd("persistent:stocks", symbol);
-
-exports.removePersistentStock = async (symbol) => 
-  await client.sRem("persistent:stocks", symbol);
-
-exports.getPersistentStocks = async () => 
-  await client.sMembers("persistent:stocks");
-
-exports.shouldSubscribe = async (symbol) => {
-  const [userCount, isPersistent] = await Promise.all([
-    exports.getStockUserCount(symbol),
-    client.sIsMember("persistent:stocks", symbol)
-  ]);
-  return userCount > 0 || isPersistent;
+  // REMOVED: await client.expire("persistent:stocks", 86400); // Make persistent until explicitly removed
 };
 
-exports.redis = client;
+exports.removePersistentStock = async (symbol) => {
+  await client.sRem("persistent:stocks", symbol);
+};
+
+exports.getPersistentStocks = async () => await client.sMembers("persistent:stocks");
+
+// NEW: Check if a stock should be subscribed (global users OR persistent alerts)
+exports.shouldSubscribe = async (symbol) => {
+  const userCount = await exports.getStockUserCount(symbol);
+  const isPersistent = await client.sIsMember("persistent:stocks", symbol);
+  return userCount > 0 || isPersistent;
+};
