@@ -178,7 +178,7 @@ mongoose
     const UpstoxTokenRefresh = require('./services/upstoxTokenRefresh');
     
     // Run daily at 6:00 AM IST (market closed - safe to restart)
-    cron.schedule('48 13 * * *', async () => {
+    cron.schedule('51 13 * * *', async () => {
       console.log('\n' + '='.repeat(70));
       console.log(`🕐 Scheduled Token Refresh Triggered`);
       console.log(`   Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
