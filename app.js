@@ -174,11 +174,12 @@ mongoose
 
     console.log("✅ Preloading complete.");
 
-    // ===== UPSTOX TOKEN AUTO-REFRESH CRON =====
+ 
+        // ===== UPSTOX TOKEN AUTO-REFRESH CRON =====
     const UpstoxTokenRefresh = require('./services/upstoxTokenRefresh');
     
     // Run daily at 6:00 AM IST (market closed - safe to restart)
-    cron.schedule('51 13 * * *', async () => {
+    cron.schedule('58 13 * * *', async () => {
       console.log('\n' + '='.repeat(70));
       console.log(`🕐 Scheduled Token Refresh Triggered`);
       console.log(`   Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
@@ -198,21 +199,32 @@ mongoose
           
           console.log('\n🔄 Restarting server with fresh token...');
           console.log('   Market closed - no users affected');
-          console.log('   Server will be back online in ~30 seconds');
-          console.log('   Ready before market opens at 9:15 AM\n');
+          console.log('   Railway will auto-restart the service\n');
           
-          // Give time for logs to be written
-          setTimeout(() => {
-            console.log('👋 Initiating graceful shutdown...');
-            process.exit(0); // Railway/PM2 will auto-restart
-          }, 5000);
+          // Force restart after token refresh
+          setTimeout(async () => {
+            console.log('👋 Closing connections...');
+            
+            try {
+              // Close MongoDB
+              await mongoose.connection.close(false);
+              console.log('✓ MongoDB closed');
+            } catch (err) {
+              console.log('⚠️ MongoDB close error (non-critical):', err.message);
+            }
+            
+            console.log('⚡ Exiting process for Railway auto-restart...');
+            
+            // Force exit - Railway will restart
+            process.exit(0);
+            
+          }, 3000); // 3 second delay
           
         } else {
           console.error('\n' + '='.repeat(70));
           console.error('❌ Token refresh failed!');
           console.error(`   Error: ${result.error}`);
           console.error('   Server will continue with existing token');
-          console.error('   Manual intervention may be required');
           console.error('='.repeat(70) + '\n');
         }
       } catch (err) {
@@ -224,6 +236,10 @@ mongoose
     }, {
       timezone: "Asia/Kolkata"
     });
+    
+    console.log('✅ Token refresh cron scheduled at 6:00 AM IST daily');
+    console.log('   Server will auto-restart after token refresh');
+
     
     console.log('✅ Token refresh cron scheduled at 6:00 AM IST daily');
     console.log('   Server will auto-restart after token refresh');
@@ -344,24 +360,34 @@ app.use((err, req, res, next) => {
 
 // ===== GRACEFUL SHUTDOWN =====
 process.on('SIGTERM', async () => {
-  console.log('⚠️ SIGTERM signal received: closing HTTP server');
-  server.close(async () => {
-    console.log('✅ HTTP server closed');
-    await mongoose.connection.close();
-    console.log('✅ MongoDB connection closed');
+  console.log('⚠️ SIGTERM signal received');
+  
+  // Set timeout to force exit after 5 seconds
+  const forceExitTimeout = setTimeout(() => {
+    console.log('⚡ Forced shutdown after timeout');
     process.exit(0);
-  });
+  }, 5000);
+  
+  try {
+    server.close(async () => {
+      console.log('✅ HTTP server closed');
+      await mongoose.connection.close();
+      console.log('✅ MongoDB closed');
+      clearTimeout(forceExitTimeout);
+      process.exit(0);
+    });
+  } catch (err) {
+    console.error('Error during shutdown:', err.message);
+    clearTimeout(forceExitTimeout);
+    process.exit(1);
+  }
 });
 
 process.on('SIGINT', async () => {
-  console.log('⚠️ SIGINT signal received: closing HTTP server');
-  server.close(async () => {
-    console.log('✅ HTTP server closed');
-    await mongoose.connection.close();
-    console.log('✅ MongoDB connection closed');
-    process.exit(0);
-  });
+  console.log('⚠️ SIGINT signal received');
+  process.exit(0);
 });
+
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (err) => {
