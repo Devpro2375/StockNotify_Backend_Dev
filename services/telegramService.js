@@ -114,7 +114,7 @@ class TelegramService {
   setupCommands() {
     if (!this.bot) return;
 
-    // Start command
+    // Start command with copy button
     this.bot.onText(/\/start/, async (msg) => {
       const chatId = msg.chat.id;
       const username = msg.from.username || msg.from.first_name || 'User';
@@ -126,22 +126,124 @@ Hi ${username}! 👋
 
 To receive real-time stock alerts:
 
-1️⃣ Copy your Chat ID: ${chatId}
-2️⃣ Go to the app settings
-3️⃣ Link your Telegram account
+1️⃣ Click the "📋 Copy Chat ID" button below
+2️⃣ Go to your app settings
+3️⃣ Paste and link your Telegram account
 4️⃣ Start receiving instant alerts! 🚀
 
 Use /help to see all commands.
       `.trim();
 
-      await this.sendMessage(chatId, message);
+      // Inline keyboard with copy button
+      const keyboard = {
+        inline_keyboard: [
+          [
+            {
+              text: '📋 Copy Chat ID',
+              callback_data: `copy_chat_id_${chatId}`
+            }
+          ],
+          [
+            {
+              text: '🔗 Link Instructions',
+              callback_data: 'link_instructions'
+            }
+          ],
+          [
+            {
+              text: '❓ Help',
+              callback_data: 'help'
+            }
+          ]
+        ]
+      };
+
+      await this.bot.sendMessage(chatId, message, {
+        reply_markup: keyboard
+      });
+    });
+
+    // Handle callback queries
+    this.bot.on('callback_query', async (callbackQuery) => {
+      const chatId = callbackQuery.message.chat.id;
+      const data = callbackQuery.data;
+      const messageId = callbackQuery.message.message_id;
+
+      try {
+        if (data.startsWith('copy_chat_id_')) {
+          const userChatId = data.replace('copy_chat_id_', '');
+          
+          // Send Chat ID in monospace format (easy to copy with long-press)
+          await this.bot.sendMessage(
+            chatId, 
+            `✅ Your Chat ID:\n\`\`\`\n${userChatId}\n\`\`\`\n\n💡 Long-press the number above to copy it.`,
+            {
+              parse_mode: 'Markdown',
+              reply_to_message_id: messageId
+            }
+          );
+
+          // Answer callback to remove loading state
+          await this.bot.answerCallbackQuery(callbackQuery.id, {
+            text: '✅ Chat ID sent! Long-press to copy.',
+            show_alert: false
+          });
+        } 
+        else if (data === 'link_instructions') {
+          const instructions = `
+🔗 How to Link Your Account:
+
+**Step 1:** Copy your Chat ID (click button above)
+**Step 2:** Open your Stock Alerts app
+**Step 3:** Navigate to Settings → Telegram
+**Step 4:** Paste your Chat ID in the field
+**Step 5:** Click "Link Telegram Account"
+
+✅ Done! You'll receive instant notifications.
+          `.trim();
+          
+          await this.bot.sendMessage(chatId, instructions, {
+            parse_mode: 'Markdown',
+            reply_to_message_id: messageId
+          });
+          
+          await this.bot.answerCallbackQuery(callbackQuery.id);
+        }
+        else if (data === 'help') {
+          const helpMessage = `
+📚 **Available Commands**
+
+/start - Get your Chat ID & link instructions
+/status - Check your alert status
+/link - Get detailed linking guide
+/unlink - Unlink your account
+/help - Show this message
+
+📲 **Need Support?**
+Contact your admin if you need assistance.
+          `.trim();
+          
+          await this.bot.sendMessage(chatId, helpMessage, {
+            parse_mode: 'Markdown',
+            reply_to_message_id: messageId
+          });
+          
+          await this.bot.answerCallbackQuery(callbackQuery.id);
+        }
+      } catch (error) {
+        console.error('❌ Callback query error:', error);
+        await this.bot.answerCallbackQuery(callbackQuery.id, {
+          text: '❌ Error processing request. Try again.',
+          show_alert: true
+        });
+      }
     });
 
     // Help command
     this.bot.onText(/\/help/, async (msg) => {
       const chatId = msg.chat.id;
       const message = `
-📚 Available Commands
+📚 **Available Commands**
 
 /start - Get your Chat ID
 /status - Check your alert status
@@ -149,10 +251,12 @@ Use /help to see all commands.
 /unlink - Unlink your account
 /help - Show this message
 
-Need support? Contact your admin.
+📲 Need support? Contact your admin.
       `.trim();
 
-      await this.sendMessage(chatId, message);
+      await this.bot.sendMessage(chatId, message, {
+        parse_mode: 'Markdown'
+      });
     });
 
     // Status command
@@ -171,17 +275,20 @@ Need support? Contact your admin.
         const alertCount = await Alert.countDocuments({ user: user._id });
 
         const message = `
-✅ Account Status
+✅ **Account Status**
 
 👤 User: ${user.name}
 📧 Email: ${user.email}
 🔔 Active Alerts: ${alertCount}
 📅 Linked: ${new Date(user.telegramLinkedAt).toLocaleDateString()}
+🔋 Status: ${user.telegramEnabled ? 'Active 🟢' : 'Paused 🟡'}
 
-Status: Active 🟢
+Your account is working properly!
         `.trim();
 
-        await this.sendMessage(chatId, message);
+        await this.bot.sendMessage(chatId, message, {
+          parse_mode: 'Markdown'
+        });
       } catch (error) {
         console.error('Status command error:', error);
         await this.sendMessage(chatId, '❌ Error fetching status. Please try again.');
@@ -191,19 +298,25 @@ Status: Active 🟢
     // Link command
     this.bot.onText(/\/link/, async (msg) => {
       const chatId = msg.chat.id;
+      
       const message = `
-🔗 Link Your Account
+🔗 **Link Your Account**
 
-1. Copy your Chat ID: ${chatId}
-2. Open the app settings
-3. Navigate to Notifications → Telegram
+Your Chat ID: \`${chatId}\`
+
+**Quick Steps:**
+1. Copy your Chat ID above (long-press)
+2. Open the Stock Alerts app
+3. Go to Settings → Telegram
 4. Paste your Chat ID
 5. Click "Link Account"
 
 Done! You'll start receiving alerts immediately. 🎉
       `.trim();
 
-      await this.sendMessage(chatId, message);
+      await this.bot.sendMessage(chatId, message, {
+        parse_mode: 'Markdown'
+      });
     });
 
     // Unlink command
