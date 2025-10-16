@@ -171,79 +171,35 @@ mongoose
     console.log("✅ Preloading complete.");
 
 
-
-    console.log("✅ Preloading complete.");
-
- 
         // ===== UPSTOX TOKEN AUTO-REFRESH CRON =====
     const UpstoxTokenRefresh = require('./services/upstoxTokenRefresh');
     
-    // Run daily at 6:00 AM IST (market closed - safe to restart)
-    cron.schedule('58 13 * * *', async () => {
-      console.log('\n' + '='.repeat(70));
-      console.log(`🕐 Scheduled Token Refresh Triggered`);
-      console.log(`   Time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
-      console.log(`   Market Status: CLOSED (opens at 9:15 AM)`);
-      console.log('='.repeat(70) + '\n');
-      
-      try {
-        const refresher = new UpstoxTokenRefresh();
-        const result = await refresher.refreshToken();
-        
-        if (result.success) {
-          console.log('\n' + '='.repeat(70));
-          console.log('✅ Token refresh successful!');
-          console.log(`   Token valid until: ${result.expiresAt}`);
-          console.log(`   Duration: ${result.duration}s`);
-          console.log('='.repeat(70));
-          
-          console.log('\n🔄 Restarting server with fresh token...');
-          console.log('   Market closed - no users affected');
-          console.log('   Railway will auto-restart the service\n');
-          
-          // Force restart after token refresh
-          setTimeout(async () => {
-            console.log('👋 Closing connections...');
-            
-            try {
-              // Close MongoDB
-              await mongoose.connection.close(false);
-              console.log('✓ MongoDB closed');
-            } catch (err) {
-              console.log('⚠️ MongoDB close error (non-critical):', err.message);
-            }
-            
-            console.log('⚡ Exiting process for Railway auto-restart...');
-            
-            // Force exit - Railway will restart
-            process.exit(0);
-            
-          }, 3000); // 3 second delay
-          
-        } else {
-          console.error('\n' + '='.repeat(70));
-          console.error('❌ Token refresh failed!');
-          console.error(`   Error: ${result.error}`);
-          console.error('   Server will continue with existing token');
-          console.error('='.repeat(70) + '\n');
-        }
-      } catch (err) {
-        console.error('\n' + '='.repeat(70));
-        console.error('❌ Token refresh error:', err.message);
-        console.error('   Server will continue with existing token');
-        console.error('='.repeat(70) + '\n');
-      }
-    }, {
-      timezone: "Asia/Kolkata"
-    });
+    // Run daily at 6:30 AM IST (0:30 UTC)
+ // 🧪 TESTING: Run at 1:05 PM IST
+cron.schedule('06 14 * * *', async () => {  // ✅ 13:05 = 1:05 PM
+  console.log(`\n[${ new Date().toISOString()}] 🧪 TEST: Automatic token refresh triggered`);
+  console.log(`Current IST time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n`);
+  
+  try {
+    const refresher = new UpstoxTokenRefresh();
+    const result = await refresher.refreshToken();
     
-    console.log('✅ Token refresh cron scheduled at 6:00 AM IST daily');
-    console.log('   Server will auto-restart after token refresh');
+    if (result.success) {
+      console.log(`[${new Date().toISOString()}] ✅ Token refresh successful - expires at ${result.expiresAt}`);
+    } else {
+      console.error(`[${new Date().toISOString()}] ❌ Token refresh failed:`, result.error);
+    }
+  } catch (err) {
+    console.error(`[${new Date().toISOString()}] ❌ Token refresh error:`, err.message);
+  }
+}, {
+  timezone: "Asia/Kolkata"
+});
+
+console.log('🧪 TEST: Token refresh cron scheduled at 1:05 PM IST');
 
     
-    console.log('✅ Token refresh cron scheduled at 6:00 AM IST daily');
-    console.log('   Server will auto-restart after token refresh');
-    console.log('   Market closed - no user impact');
+    console.log('✅ Upstox token refresh cron scheduled at 6:00 AM IST daily');
 
 
     // ===== INITIALIZE TELEGRAM BOT =====
@@ -360,34 +316,24 @@ app.use((err, req, res, next) => {
 
 // ===== GRACEFUL SHUTDOWN =====
 process.on('SIGTERM', async () => {
-  console.log('⚠️ SIGTERM signal received');
-  
-  // Set timeout to force exit after 5 seconds
-  const forceExitTimeout = setTimeout(() => {
-    console.log('⚡ Forced shutdown after timeout');
+  console.log('⚠️ SIGTERM signal received: closing HTTP server');
+  server.close(async () => {
+    console.log('✅ HTTP server closed');
+    await mongoose.connection.close();
+    console.log('✅ MongoDB connection closed');
     process.exit(0);
-  }, 5000);
-  
-  try {
-    server.close(async () => {
-      console.log('✅ HTTP server closed');
-      await mongoose.connection.close();
-      console.log('✅ MongoDB closed');
-      clearTimeout(forceExitTimeout);
-      process.exit(0);
-    });
-  } catch (err) {
-    console.error('Error during shutdown:', err.message);
-    clearTimeout(forceExitTimeout);
-    process.exit(1);
-  }
+  });
 });
 
 process.on('SIGINT', async () => {
-  console.log('⚠️ SIGINT signal received');
-  process.exit(0);
+  console.log('⚠️ SIGINT signal received: closing HTTP server');
+  server.close(async () => {
+    console.log('✅ HTTP server closed');
+    await mongoose.connection.close();
+    console.log('✅ MongoDB connection closed');
+    process.exit(0);
+  });
 });
-
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (err) => {
