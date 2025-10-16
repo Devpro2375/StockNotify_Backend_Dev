@@ -110,3 +110,27 @@
 2025-10-16 12:54:59,516 [INFO] ======================================================================
 2025-10-16 12:54:59,547 [INFO] [DB] MongoDB connection closed
 2025-10-16 12:54:59,547 [INFO] [EXIT] Exiting with code 0
+2025-10-16 13:05:01,177 [INFO] ======================================================================
+2025-10-16 13:05:01,179 [INFO] [START] Upstox Token Refresh Started
+2025-10-16 13:05:01,179 [INFO]         Railway Environment: local
+2025-10-16 13:05:01,179 [INFO]         Railway Service: N/A
+2025-10-16 13:05:01,179 [INFO]         Platform: win32
+2025-10-16 13:05:01,179 [INFO] ======================================================================
+2025-10-16 13:05:01,179 [INFO] [DB] Connecting to MongoDB: watchlist
+2025-10-16 13:05:10,012 [INFO] [OK] MongoDB connected: watchlist
+2025-10-16 13:05:10,012 [INFO] [AUTH] Initializing Upstox TOTP client...
+2025-10-16 13:05:10,015 [INFO] [OK] Upstox TOTP client initialized
+2025-10-16 13:05:10,015 [INFO] [REFRESH] Generating new access token...
+2025-10-16 13:05:16,919 [INFO] [OK] Token generated successfully
+2025-10-16 13:05:16,919 [INFO]      User: DEVESH MUKESH BADGUJAR (8GATLG)
+2025-10-16 13:05:16,919 [INFO]      Email: badgujardevesh25@gmail.com
+2025-10-16 13:05:16,919 [INFO]      Broker: UPSTOX
+2025-10-16 13:05:16,952 [INFO] [OK] Token saved to MongoDB
+2025-10-16 13:05:16,952 [INFO]      Collection: accesstokens
+2025-10-16 13:05:16,952 [INFO]      Expires at: 2025-10-17 07:05:16 UTC
+2025-10-16 13:05:16,952 [INFO] ======================================================================
+2025-10-16 13:05:16,952 [INFO] [SUCCESS] Token Refresh Completed!
+2025-10-16 13:05:16,952 [INFO]           Execution time: 15.77 seconds
+2025-10-16 13:05:16,952 [INFO] ======================================================================
+2025-10-16 13:05:16,982 [INFO] [DB] MongoDB connection closed
+2025-10-16 13:05:16,982 [INFO] [EXIT] Exiting with code 0
