@@ -114,51 +114,28 @@ class TelegramService {
   setupCommands() {
     if (!this.bot) return;
 
-    // Start command with copy button
+    // Start command - Simplified with tap-to-copy
     this.bot.onText(/\/start/, async (msg) => {
       const chatId = msg.chat.id;
       const username = msg.from.username || msg.from.first_name || 'User';
 
-      const message = `
-🤖 Welcome to Stock Alerts Bot!
+      const message = `👋 **Hi ${username}!**
 
-Hi ${username}! 👋
+Get instant stock alerts on Telegram.
 
-To receive real-time stock alerts:
+**Your Chat ID:**
+\`${chatId}\`
+_(Tap above to copy)_`;
 
-1️⃣ Click the "📋 Copy Chat ID" button below
-2️⃣ Go to your app settings
-3️⃣ Paste and link your Telegram account
-4️⃣ Start receiving instant alerts! 🚀
-
-Use /help to see all commands.
-      `.trim();
-
-      // Inline keyboard with copy button
       const keyboard = {
         inline_keyboard: [
-          [
-            {
-              text: '📋 Copy Chat ID',
-              callback_data: `copy_chat_id_${chatId}`
-            }
-          ],
-          [
-            {
-              text: '🔗 Link Instructions',
-              callback_data: 'link_instructions'
-            }
-          ],
-          [
-            {
-              text: '❓ Help',
-              callback_data: 'help'
-            }
-          ]
+          [{ text: '✅ How to Link', callback_data: 'link_guide' }],
+          [{ text: '📊 Check Status', callback_data: 'status' }]
         ]
       };
 
       await this.bot.sendMessage(chatId, message, {
+        parse_mode: 'Markdown',
         reply_markup: keyboard
       });
     });
@@ -167,94 +144,63 @@ Use /help to see all commands.
     this.bot.on('callback_query', async (callbackQuery) => {
       const chatId = callbackQuery.message.chat.id;
       const data = callbackQuery.data;
-      const messageId = callbackQuery.message.message_id;
 
       try {
-        if (data.startsWith('copy_chat_id_')) {
-          const userChatId = data.replace('copy_chat_id_', '');
-          
-          // Send Chat ID in monospace format (easy to copy with long-press)
-          await this.bot.sendMessage(
-            chatId, 
-            `✅ Your Chat ID:\n\`\`\`\n${userChatId}\n\`\`\`\n\n💡 Long-press the number above to copy it.`,
-            {
-              parse_mode: 'Markdown',
-              reply_to_message_id: messageId
-            }
-          );
+        if (data === 'link_guide') {
+          const guide = `🔗 **3 Easy Steps:**
 
-          // Answer callback to remove loading state
-          await this.bot.answerCallbackQuery(callbackQuery.id, {
-            text: '✅ Chat ID sent! Long-press to copy.',
-            show_alert: false
+1️⃣ Tap your Chat ID to copy
+2️⃣ Open app → Settings → Telegram  
+3️⃣ Paste & click "Link"
+
+✅ Done! Alerts will arrive here.`;
+          
+          await this.bot.sendMessage(chatId, guide, {
+            parse_mode: 'Markdown'
           });
-        } 
-        else if (data === 'link_instructions') {
-          const instructions = `
-🔗 How to Link Your Account:
-
-**Step 1:** Copy your Chat ID (click button above)
-**Step 2:** Open your Stock Alerts app
-**Step 3:** Navigate to Settings → Telegram
-**Step 4:** Paste your Chat ID in the field
-**Step 5:** Click "Link Telegram Account"
-
-✅ Done! You'll receive instant notifications.
-          `.trim();
-          
-          await this.bot.sendMessage(chatId, instructions, {
-            parse_mode: 'Markdown',
-            reply_to_message_id: messageId
-          });
-          
           await this.bot.answerCallbackQuery(callbackQuery.id);
         }
-        else if (data === 'help') {
-          const helpMessage = `
-📚 **Available Commands**
-
-/start - Get your Chat ID & link instructions
-/status - Check your alert status
-/link - Get detailed linking guide
-/unlink - Unlink your account
-/help - Show this message
-
-📲 **Need Support?**
-Contact your admin if you need assistance.
-          `.trim();
+        else if (data === 'status') {
+          const user = await User.findOne({ telegramChatId: chatId.toString() });
           
-          await this.bot.sendMessage(chatId, helpMessage, {
-            parse_mode: 'Markdown',
-            reply_to_message_id: messageId
+          if (!user) {
+            await this.bot.sendMessage(chatId, '❌ Not linked. Use /start to get your Chat ID.');
+            await this.bot.answerCallbackQuery(callbackQuery.id);
+            return;
+          }
+
+          const Alert = require('../models/Alert');
+          const alertCount = await Alert.countDocuments({ user: user._id });
+
+          const statusMsg = `✅ **Linked Successfully**
+
+👤 ${user.name}
+🔔 ${alertCount} active alerts
+📅 Since ${new Date(user.telegramLinkedAt).toLocaleDateString()}`;
+
+          await this.bot.sendMessage(chatId, statusMsg, {
+            parse_mode: 'Markdown'
           });
-          
           await this.bot.answerCallbackQuery(callbackQuery.id);
         }
       } catch (error) {
-        console.error('❌ Callback query error:', error);
+        console.error('❌ Callback error:', error);
         await this.bot.answerCallbackQuery(callbackQuery.id, {
-          text: '❌ Error processing request. Try again.',
+          text: '❌ Error. Try again.',
           show_alert: true
         });
       }
     });
 
-    // Help command
+    // Help command - Minimized
     this.bot.onText(/\/help/, async (msg) => {
-      const chatId = msg.chat.id;
-      const message = `
-📚 **Available Commands**
+      const message = `📚 **Commands**
 
-/start - Get your Chat ID
-/status - Check your alert status
-/link - Get linking instructions
-/unlink - Unlink your account
-/help - Show this message
+/start - Get Chat ID
+/status - Check link status
+/unlink - Disconnect account`;
 
-📲 Need support? Contact your admin.
-      `.trim();
-
-      await this.bot.sendMessage(chatId, message, {
+      await this.bot.sendMessage(msg.chat.id, message, {
         parse_mode: 'Markdown'
       });
     });
@@ -267,59 +213,29 @@ Contact your admin if you need assistance.
         const user = await User.findOne({ telegramChatId: chatId.toString() });
         
         if (!user) {
-          await this.sendMessage(chatId, '❌ Account not linked. Use /start to link your account.');
+          await this.sendMessage(chatId, '❌ Not linked. Use /start first.');
           return;
         }
 
         const Alert = require('../models/Alert');
         const alertCount = await Alert.countDocuments({ user: user._id });
 
-        const message = `
-✅ **Account Status**
+        const message = `✅ **Account Active**
 
-👤 User: ${user.name}
-📧 Email: ${user.email}
-🔔 Active Alerts: ${alertCount}
-📅 Linked: ${new Date(user.telegramLinkedAt).toLocaleDateString()}
-🔋 Status: ${user.telegramEnabled ? 'Active 🟢' : 'Paused 🟡'}
-
-Your account is working properly!
-        `.trim();
+👤 ${user.name}
+🔔 ${alertCount} alerts
+📅 ${new Date(user.telegramLinkedAt).toLocaleDateString()}`;
 
         await this.bot.sendMessage(chatId, message, {
           parse_mode: 'Markdown'
         });
       } catch (error) {
-        console.error('Status command error:', error);
-        await this.sendMessage(chatId, '❌ Error fetching status. Please try again.');
+        console.error('Status error:', error);
+        await this.sendMessage(chatId, '❌ Error. Try /start again.');
       }
     });
 
-    // Link command
-    this.bot.onText(/\/link/, async (msg) => {
-      const chatId = msg.chat.id;
-      
-      const message = `
-🔗 **Link Your Account**
-
-Your Chat ID: \`${chatId}\`
-
-**Quick Steps:**
-1. Copy your Chat ID above (long-press)
-2. Open the Stock Alerts app
-3. Go to Settings → Telegram
-4. Paste your Chat ID
-5. Click "Link Account"
-
-Done! You'll start receiving alerts immediately. 🎉
-      `.trim();
-
-      await this.bot.sendMessage(chatId, message, {
-        parse_mode: 'Markdown'
-      });
-    });
-
-    // Unlink command
+    // Unlink command - Simplified
     this.bot.onText(/\/unlink/, async (msg) => {
       const chatId = msg.chat.id;
       
@@ -327,7 +243,7 @@ Done! You'll start receiving alerts immediately. 🎉
         const user = await User.findOne({ telegramChatId: chatId.toString() });
         
         if (!user) {
-          await this.sendMessage(chatId, '❌ No linked account found.');
+          await this.sendMessage(chatId, '❌ No linked account.');
           return;
         }
 
@@ -336,10 +252,10 @@ Done! You'll start receiving alerts immediately. 🎉
         user.telegramEnabled = false;
         await user.save();
 
-        await this.sendMessage(chatId, '✅ Account unlinked successfully. Use /start to link again.');
+        await this.sendMessage(chatId, '✅ Unlinked. Use /start to reconnect.');
       } catch (error) {
-        console.error('Unlink command error:', error);
-        await this.sendMessage(chatId, '❌ Error unlinking account. Please try again.');
+        console.error('Unlink error:', error);
+        await this.sendMessage(chatId, '❌ Error. Try again.');
       }
     });
   }
