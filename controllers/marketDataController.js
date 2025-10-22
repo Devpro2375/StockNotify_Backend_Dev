@@ -5,6 +5,7 @@ const upstoxService = require("../services/upstoxService");
 const axios = require("axios");
 const config = require("../config/config");
 
+
 exports.getQuotes = async (req, res) => {
   try {
     const { instruments } = req.query;
