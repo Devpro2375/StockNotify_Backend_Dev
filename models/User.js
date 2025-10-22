@@ -27,7 +27,7 @@ userSchema.index({ email: 1 });
 userSchema.index({ username: 1 });
 userSchema.index({ verificationToken: 1 });
 
-module.exports = mongoose.model('User', userSchema);
+
 
 
 userSchema.pre('save', async function(next) {
