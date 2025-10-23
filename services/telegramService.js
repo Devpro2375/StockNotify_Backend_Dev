@@ -7,6 +7,10 @@ class TelegramService {
     this.bot = null;
     this.isInitialized = false;
     this.pollingActive = false;
+    this.commandsSetup = false; // ✅ Prevent duplicate handlers
+    this.reconnectAttempts = 0;
+    this.maxReconnectAttempts = 5;
+    this.healthCheckInterval = null;
   }
 
   async init() {
@@ -35,31 +39,49 @@ class TelegramService {
 
       if (isProduction && hasValidWebhook) {
         // Production: Use ONLY webhook
-        try {
-          await this.bot.setWebHook(config.telegramWebhookUrl, {
-            max_connections: 100,
-            drop_pending_updates: false,
-          });
-          console.log("✅ Telegram webhook set:", config.telegramWebhookUrl);
-
-          // Verify webhook is set
-          const webhookInfo = await this.bot.getWebHookInfo();
-          console.log("📋 Webhook info:", webhookInfo);
-        } catch (error) {
-          console.error("❌ Webhook setup failed:", error.message);
-          throw error; // Don't fallback to polling in production
-        }
+        await this.setupWebhook();
       } else {
         // Development: Use ONLY polling
         await this.startPolling();
       }
 
-      this.setupCommands();
+      // ✅ Setup commands only once
+      if (!this.commandsSetup) {
+        this.setupCommands();
+        this.commandsSetup = true;
+      }
+
+      // ✅ Setup global error handler
+      this.setupErrorHandlers();
+
+      // ✅ Start health check
+      this.startHealthCheck();
+
       this.isInitialized = true;
       console.log("✅ Telegram bot initialized successfully");
     } catch (error) {
       console.error("❌ Telegram bot initialization failed:", error.message);
       this.isInitialized = false;
+      
+      // ✅ Retry initialization instead of giving up
+      await this.scheduleReconnect();
+    }
+  }
+
+  async setupWebhook() {
+    try {
+      await this.bot.setWebHook(config.telegramWebhookUrl, {
+        max_connections: 100,
+        drop_pending_updates: false,
+      });
+      console.log("✅ Telegram webhook set:", config.telegramWebhookUrl);
+
+      // Verify webhook is set
+      const webhookInfo = await this.bot.getWebHookInfo();
+      console.log("📋 Webhook info:", webhookInfo);
+    } catch (error) {
+      console.error("❌ Webhook setup failed:", error.message);
+      throw error;
     }
   }
 
@@ -71,7 +93,7 @@ class TelegramService {
 
       // Start polling with proper configuration
       await this.bot.startPolling({
-        restart: false,
+        restart: true, // ✅ Enable auto-restart on errors
         polling: {
           interval: 1000,
           autoStart: true,
@@ -82,19 +104,8 @@ class TelegramService {
       });
 
       this.pollingActive = true;
+      this.reconnectAttempts = 0; // ✅ Reset on success
       console.log("✅ Telegram polling started");
-
-      // Handle polling errors
-      this.bot.on("polling_error", (error) => {
-        console.error("❌ Telegram polling error:", error.message);
-
-        // Don't auto-restart on 409 - it means another instance is running
-        if (error.code === "ETELEGRAM" && error.response?.statusCode === 409) {
-          console.error("⚠️ CONFLICT: Another bot instance is running!");
-          console.error("⚠️ Stop all other instances before restarting.");
-          process.exit(1); // Exit to prevent conflicts
-        }
-      });
     } catch (error) {
       console.error("❌ Failed to start polling:", error.message);
       this.pollingActive = false;
@@ -102,19 +113,129 @@ class TelegramService {
     }
   }
 
-setupCommands() {
-  if (!this.bot) return;
+  // ✅ NEW: Comprehensive error handling
+  setupErrorHandlers() {
+    if (!this.bot) return;
 
-  // Start command - WITH TAP-TO-COPY
-  this.bot.onText(/\/start/, async (msg) => {
-    const chatId = msg.chat.id;
-    const username = msg.from.username || msg.from.first_name || 'User';
+    // Handle polling errors WITHOUT killing the process
+    this.bot.on("polling_error", async (error) => {
+      console.error("❌ Telegram polling error:", error.code, error.message);
+
+      // Handle 409 conflict (another instance running)
+      if (error.code === "ETELEGRAM" && error.response?.statusCode === 409) {
+        console.error("⚠️ CONFLICT: Another bot instance detected");
+        console.error("⚠️ Attempting to recover...");
+        
+        // ✅ Try to recover instead of exiting
+        this.pollingActive = false;
+        await this.scheduleReconnect();
+        return;
+      }
+
+      // Handle network errors (502, ETIMEDOUT, ENETUNREACH)
+      if (
+        error.code === "ETIMEDOUT" ||
+        error.code === "ENETUNREACH" ||
+        error.code === "ECONNRESET" ||
+        (error.response && error.response.statusCode === 502)
+      ) {
+        console.warn("⚠️ Network error, will retry automatically");
+        return; // Let polling auto-retry
+      }
+
+      // Handle EFATAL
+      if (error.code === "EFATAL") {
+        console.error("❌ FATAL: Bot token issue");
+        this.pollingActive = false;
+        await this.scheduleReconnect();
+      }
+    });
+
+    // ✅ Handle general errors
+    this.bot.on("error", (error) => {
+      console.error("❌ Telegram bot error:", error);
+    });
+
+    // ✅ Handle webhook errors
+    this.bot.on("webhook_error", (error) => {
+      console.error("❌ Telegram webhook error:", error);
+    });
+  }
+
+  // ✅ NEW: Auto-reconnect mechanism
+  async scheduleReconnect() {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.error("❌ Max reconnect attempts reached. Manual intervention needed.");
+      return;
+    }
+
+    this.reconnectAttempts++;
+    const delay = Math.min(5000 * this.reconnectAttempts, 30000); // Max 30s
+
+    console.log(`🔄 Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+
+    await this.sleep(delay);
 
     try {
-      const existingUser = await User.findOne({ telegramChatId: chatId.toString() });
-      
-      if (existingUser) {
-        const message = `✅ Already linked!
+      await this.cleanup();
+      await this.init();
+    } catch (error) {
+      console.error("❌ Reconnect failed:", error.message);
+      await this.scheduleReconnect();
+    }
+  }
+
+  // ✅ NEW: Health check to ensure bot stays alive
+  startHealthCheck() {
+    // Clear existing interval
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+    }
+
+    // Check every 5 minutes
+    this.healthCheckInterval = setInterval(async () => {
+      try {
+        if (!this.bot) {
+          console.warn("⚠️ Bot instance lost, reinitializing...");
+          await this.init();
+          return;
+        }
+
+        // Ping Telegram to verify connection
+        await this.bot.getMe();
+        console.log("✅ Health check passed");
+      } catch (error) {
+        console.error("❌ Health check failed:", error.message);
+        
+        // Attempt recovery
+        if (this.pollingActive) {
+          console.log("🔄 Restarting polling...");
+          try {
+            await this.bot.stopPolling();
+            await this.sleep(2000);
+            await this.startPolling();
+          } catch (restartError) {
+            console.error("❌ Restart failed:", restartError.message);
+            await this.scheduleReconnect();
+          }
+        }
+      }
+    }, 5 * 60 * 1000); // 5 minutes
+  }
+
+  setupCommands() {
+    if (!this.bot) return;
+
+    // ✅ Wrapped in try-catch to prevent crashes
+    this.bot.onText(/\/start/, async (msg) => {
+      try {
+        const chatId = msg.chat.id;
+        const username = msg.from.username || msg.from.first_name || 'User';
+
+        const existingUser = await User.findOne({ telegramChatId: chatId.toString() });
+        
+        if (existingUser) {
+          const message = `✅ Already linked!
 
 👤 ${existingUser.name}
 📧 ${existingUser.email}
@@ -122,17 +243,13 @@ setupCommands() {
 Your Chat ID: <code>${chatId}</code>
 (Tap above to copy)`;
 
-        await this.bot.sendMessage(chatId, message, {
-          parse_mode: 'HTML'
-        });
-        return;
-      }
-    } catch (error) {
-      console.error('Error checking user:', error);
-    }
+          await this.bot.sendMessage(chatId, message, {
+            parse_mode: 'HTML'
+          });
+          return;
+        }
 
-    // New user message with HTML formatting
-    const message = `👋 Hi ${username}!
+        const message = `👋 Hi ${username}!
 
 Get instant stock alerts on Telegram.
 
@@ -148,26 +265,29 @@ Get instant stock alerts on Telegram.
 
 ✅ Done! You'll receive alerts here.`;
 
-    const keyboard = {
-      inline_keyboard: [
-        [{ text: '❓ Help', callback_data: 'help' }]
-      ]
-    };
+        const keyboard = {
+          inline_keyboard: [
+            [{ text: '❓ Help', callback_data: 'help' }]
+          ]
+        };
 
-    await this.bot.sendMessage(chatId, message, {
-      parse_mode: 'HTML',
-      reply_markup: keyboard
+        await this.bot.sendMessage(chatId, message, {
+          parse_mode: 'HTML',
+          reply_markup: keyboard
+        });
+      } catch (error) {
+        console.error('❌ /start error:', error);
+      }
     });
-  });
 
-  // Handle callback queries
-  this.bot.on('callback_query', async (callbackQuery) => {
-    const chatId = callbackQuery.message.chat.id;
-    const data = callbackQuery.data;
+    // ✅ All callback queries wrapped in try-catch
+    this.bot.on('callback_query', async (callbackQuery) => {
+      try {
+        const chatId = callbackQuery.message.chat.id;
+        const data = callbackQuery.data;
 
-    try {
-      if (data === 'help') {
-        const guide = `*🔗 How to Link:*
+        if (data === 'help') {
+          const guide = `*🔗 How to Link:*
 
 1️⃣ Send /start to get your Chat ID
 2️⃣ Copy the Chat ID number
@@ -180,77 +300,81 @@ Get instant stock alerts on Telegram.
 /start - Get Chat ID
 /status - Check link status
 /help - Show this message`;
+          
+          await this.bot.sendMessage(chatId, guide, {
+            parse_mode: 'Markdown'
+          });
+        }
+        else if (data === 'status') {
+          const user = await User.findOne({ telegramChatId: chatId.toString() });
+          
+          if (!user) {
+            await this.bot.sendMessage(chatId, '❌ Not linked. Use /start to get your Chat ID.');
+            await this.bot.answerCallbackQuery(callbackQuery.id);
+            return;
+          }
+
+          const Alert = require('../models/Alert');
+          const alertCount = await Alert.countDocuments({ user: user._id });
+
+          const statusMsg = `*✅ Linked Successfully*
+
+👤 ${user.name}
+🔔 ${alertCount} active alerts
+📅 Since ${new Date(user.telegramLinkedAt).toLocaleDateString()}`;
+
+          await this.bot.sendMessage(chatId, statusMsg, {
+            parse_mode: 'Markdown'
+          });
+        }
         
-        await this.bot.sendMessage(chatId, guide, {
-          parse_mode: 'Markdown'
-        });
+        await this.bot.answerCallbackQuery(callbackQuery.id);
+      } catch (error) {
+        console.error('❌ Callback error:', error);
+        try {
+          await this.bot.answerCallbackQuery(callbackQuery.id, {
+            text: '❌ Error. Try /start again.',
+            show_alert: true
+          });
+        } catch (answerError) {
+          console.error('❌ Failed to answer callback:', answerError);
+        }
       }
-      else if (data === 'status') {
+    });
+
+    // ✅ Other commands also wrapped
+    this.bot.onText(/\/status/, async (msg) => {
+      try {
+        const chatId = msg.chat.id;
+        
         const user = await User.findOne({ telegramChatId: chatId.toString() });
         
         if (!user) {
-          await this.bot.sendMessage(chatId, '❌ Not linked. Use /start to get your Chat ID.');
-          await this.bot.answerCallbackQuery(callbackQuery.id);
+          await this.sendMessage(chatId, '❌ Not linked. Use /start to get your Chat ID.');
           return;
         }
 
         const Alert = require('../models/Alert');
         const alertCount = await Alert.countDocuments({ user: user._id });
 
-        const statusMsg = `*✅ Linked Successfully*
-
-👤 ${user.name}
-🔔 ${alertCount} active alerts
-📅 Since ${new Date(user.telegramLinkedAt).toLocaleDateString()}`;
-
-        await this.bot.sendMessage(chatId, statusMsg, {
-          parse_mode: 'Markdown'
-        });
-      }
-      
-      await this.bot.answerCallbackQuery(callbackQuery.id);
-    } catch (error) {
-      console.error('❌ Callback error:', error);
-      await this.bot.answerCallbackQuery(callbackQuery.id, {
-        text: '❌ Error. Try /start again.',
-        show_alert: true
-      });
-    }
-  });
-
-  // Status command
-  this.bot.onText(/\/status/, async (msg) => {
-    const chatId = msg.chat.id;
-    
-    try {
-      const user = await User.findOne({ telegramChatId: chatId.toString() });
-      
-      if (!user) {
-        await this.sendMessage(chatId, '❌ Not linked. Use /start to get your Chat ID.');
-        return;
-      }
-
-      const Alert = require('../models/Alert');
-      const alertCount = await Alert.countDocuments({ user: user._id });
-
-      const message = `*✅ Account Active*
+        const message = `*✅ Account Active*
 
 👤 ${user.name}
 🔔 ${alertCount} alerts
 📅 ${new Date(user.telegramLinkedAt).toLocaleDateString()}`;
 
-      await this.bot.sendMessage(chatId, message, {
-        parse_mode: 'Markdown'
-      });
-    } catch (error) {
-      console.error('Status error:', error);
-      await this.sendMessage(chatId, '❌ Error. Try /start again.');
-    }
-  });
+        await this.bot.sendMessage(chatId, message, {
+          parse_mode: 'Markdown'
+        });
+      } catch (error) {
+        console.error('❌ Status error:', error);
+        await this.sendMessage(chatId, '❌ Error. Try /start again.');
+      }
+    });
 
-  // Help command
-  this.bot.onText(/\/help/, async (msg) => {
-    const message = `*📚 Commands*
+    this.bot.onText(/\/help/, async (msg) => {
+      try {
+        const message = `*📚 Commands*
 
 /start - Get your Chat ID
 /status - Check link status
@@ -262,47 +386,44 @@ Get instant stock alerts on Telegram.
 3. Link in web app
 4. Receive alerts here`;
 
-    await this.bot.sendMessage(msg.chat.id, message, {
-      parse_mode: 'Markdown'
-    });
-  });
-
-  // Unlink command
-  this.bot.onText(/\/unlink/, async (msg) => {
-    const chatId = msg.chat.id;
-    
-    try {
-      const user = await User.findOne({ telegramChatId: chatId.toString() });
-      
-      if (!user) {
-        await this.sendMessage(chatId, '❌ No linked account found.');
-        return;
+        await this.bot.sendMessage(msg.chat.id, message, {
+          parse_mode: 'Markdown'
+        });
+      } catch (error) {
+        console.error('❌ Help error:', error);
       }
+    });
 
-      user.telegramChatId = null;
-      user.telegramUsername = null;
-      user.telegramEnabled = false;
-      await user.save();
+    this.bot.onText(/\/unlink/, async (msg) => {
+      try {
+        const chatId = msg.chat.id;
+        
+        const user = await User.findOne({ telegramChatId: chatId.toString() });
+        
+        if (!user) {
+          await this.sendMessage(chatId, '❌ No linked account found.');
+          return;
+        }
 
-      await this.sendMessage(chatId, '✅ Unlinked successfully. Use /start to reconnect.');
-    } catch (error) {
-      console.error('Unlink error:', error);
-      await this.sendMessage(chatId, '❌ Error. Try again later.');
-    }
-  });
-}
+        user.telegramChatId = null;
+        user.telegramUsername = null;
+        user.telegramEnabled = false;
+        await user.save();
 
+        await this.sendMessage(chatId, '✅ Unlinked successfully. Use /start to reconnect.');
+      } catch (error) {
+        console.error('❌ Unlink error:', error);
+        await this.sendMessage(chatId, '❌ Error. Try again later.');
+      }
+    });
+  }
 
-  /**
-   * Send alert notification (PLAIN TEXT - NO MARKDOWN)
-   */
   async sendAlert(chatId, alertDetails) {
     if (!this.isInitialized || !this.bot) {
       console.warn("⚠️ Telegram bot not initialized");
       return false;
     }
 
-    // Validate chat ID
     if (
       !chatId ||
       chatId === "null" ||
@@ -335,7 +456,6 @@ Get instant stock alerts on Telegram.
 
     const statusInfo = statusConfig[status] || statusConfig.enter;
 
-    // Calculate P&L
     let pnlPercent = 0;
     if (status === "targetHit" || status === "slHit") {
       if (trend === "bullish") {
@@ -350,7 +470,6 @@ Get instant stock alerts on Telegram.
         ? `\n💰 P&L: ${pnlPercent > 0 ? "+" : ""}${pnlPercent.toFixed(2)}%`
         : "";
 
-    // Plain text message (NO MARKDOWN)
     const message = `${statusInfo.emoji} ${statusInfo.title}
 
 📊 ${trading_symbol}
@@ -380,9 +499,6 @@ Get instant stock alerts on Telegram.
     }
   }
 
-  /**
-   * Send message with retry logic
-   */
   async sendMessageWithRetry(chatId, text, options = {}, retries = 3) {
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
@@ -393,7 +509,6 @@ Get instant stock alerts on Telegram.
         const errorMessage =
           error.message || error.response?.body?.description || "";
 
-        // Handle rate limit (429)
         if (error.response && error.response.statusCode === 429) {
           const retryAfter = error.response.body?.parameters?.retry_after || 30;
           console.warn(`⚠️ Rate limited. Retrying after ${retryAfter}s`);
@@ -404,7 +519,6 @@ Get instant stock alerts on Telegram.
           }
         }
 
-        // Handle blocked user (403)
         if (error.response && error.response.statusCode === 403) {
           console.warn(`⚠️ User blocked bot: ${chatId}`);
           await User.findOneAndUpdate(
@@ -414,7 +528,6 @@ Get instant stock alerts on Telegram.
           return false;
         }
 
-        // Handle chat not found (400)
         if (errorMessage.includes("chat not found")) {
           console.error(
             `❌ Chat not found: ${chatId}. User needs to /start bot first.`
@@ -426,7 +539,6 @@ Get instant stock alerts on Telegram.
           return false;
         }
 
-        // Handle Markdown parsing errors - remove parse_mode and retry
         if (errorMessage.includes("can't parse entities")) {
           console.error(`❌ Markdown parsing error. Removing formatting...`);
           if (options.parse_mode) {
@@ -451,16 +563,10 @@ Get instant stock alerts on Telegram.
     return false;
   }
 
-  /**
-   * Send simple message
-   */
   async sendMessage(chatId, text, options = {}) {
     return this.sendMessageWithRetry(chatId, text, options);
   }
 
-  /**
-   * Process webhook update
-   */
   async processUpdate(update) {
     if (!this.bot) return;
 
@@ -471,16 +577,10 @@ Get instant stock alerts on Telegram.
     }
   }
 
-  /**
-   * Sleep utility
-   */
   sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  /**
-   * Get bot info
-   */
   async getBotInfo() {
     if (!this.bot) return null;
     try {
@@ -491,18 +591,26 @@ Get instant stock alerts on Telegram.
     }
   }
 
-  /**
-   * Cleanup
-   */
+  // ✅ Enhanced cleanup
   async cleanup() {
+    // Clear health check
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+      this.healthCheckInterval = null;
+    }
+
     if (this.pollingActive && this.bot) {
       try {
         await this.bot.stopPolling();
+        this.pollingActive = false;
         console.log("✅ Telegram polling stopped");
       } catch (error) {
         console.error("❌ Error stopping polling:", error);
       }
     }
+
+    this.isInitialized = false;
+    this.commandsSetup = false;
   }
 }
 
