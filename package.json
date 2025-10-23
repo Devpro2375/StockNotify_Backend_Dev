@@ -51,6 +51,7 @@
     "passport-google-oauth20": "^2.0.0",
     "protobufjs": "^7.3.2",
     "redis": "^4.7.0",
+    "resend": "^6.2.2",
     "socket.io": "^4.7.5",
     "winston": "^3.17.0",
     "ws": "^8.18.0"

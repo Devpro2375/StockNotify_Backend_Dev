@@ -19,6 +19,7 @@ module.exports = {
   emailPort: 587,
   emailUser: process.env.EMAIL_USER,
   emailPass: process.env.EMAIL_PASS,
+  resendApiKey: process.env.RESEND_API_KEY, // Add this line
   baseUrl: process.env.BASE_URL,
   frontendBaseUrl: process.env.FRONTEND_BASE_URL,
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
