@@ -5,11 +5,9 @@ const crypto = require("crypto");
 const { sendVerificationEmail } = require("../utils/email");
 const { validationResult } = require("express-validator");
 
-
 // User cache for /me endpoint
 const userCache = new Map();
 const CACHE_TTL = 300000; // 5 minutes
-
 
 // Generate JWT with flexible expiry
 const generateToken = (userId, rememberMe = false) => {
@@ -18,16 +16,11 @@ const generateToken = (userId, rememberMe = false) => {
   return jwt.sign(payload, config.jwtSecret, { expiresIn });
 };
 
-
 // Clear user from cache
 const clearUserCache = (userId) => {
   userCache.delete(userId);
 };
 
-
-// ============================================
-// UPDATED: Register with AWAIT email sending
-// ============================================
 exports.register = async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -35,7 +28,6 @@ exports.register = async (req, res) => {
   }
 
   const { username, email, password } = req.body;
-  
   try {
     // Check both email and username in one query
     const existingUser = await User.findOne({ $or: [{ email }, { username }] });
@@ -48,46 +40,24 @@ exports.register = async (req, res) => {
 
     const user = new User({ username, email, password });
     user.verificationToken = crypto.randomBytes(32).toString("hex");
-    user.verificationTokenExpires = Date.now() + 3600000; // 1 hour
+    user.verificationTokenExpires = Date.now() + 3600000;
     await user.save();
 
     const verifyUrl = `${config.frontendBaseUrl}/verify-email?token=${user.verificationToken}`;
 
-    // ✅ CRITICAL FIX: Wait for email to send
-    try {
-      console.log(`📧 Attempting to send verification email to: ${email}`);
-      await sendVerificationEmail(user.email, verifyUrl);
-      console.log(`✅ Verification email sent successfully to ${user.email}`);
-      
-      res.json({
-        msg: "Registration successful. Please check your email to verify.",
-        success: true
-      });
-    } catch (emailError) {
-      // Email failed but user is created - log detailed error
-      console.error("❌ VERIFICATION EMAIL FAILED:");
-      console.error("Message:", emailError.message);
-      console.error("Code:", emailError.code);
-      console.error("Command:", emailError.command);
-      console.error("Response:", emailError.response);
-      console.error("ResponseCode:", emailError.responseCode);
-      
-      // Still return success but with warning
-      res.json({
-        msg: "Registration successful. However, we're experiencing issues sending verification emails. Please try resending it from the login page.",
-        success: true,
-        emailWarning: true
-      });
-    }
-  } catch (err) {
-    console.error("❌ Registration error:", err);
-    res.status(500).json({ 
-      msg: "Server error",
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+    // Don't wait for email - send async
+    sendVerificationEmail(user.email, verifyUrl).catch((err) =>
+      console.error("Email send error:", err)
+    );
+
+    res.json({
+      msg: "Registration successful. Please check your email to verify.",
     });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Server error");
   }
 };
-
 
 exports.login = async (req, res) => {
   const errors = validationResult(req);
@@ -144,7 +114,6 @@ exports.login = async (req, res) => {
     res.status(500).send("Server error");
   }
 };
-
 
 exports.verifyEmail = async (req, res) => {
   const { token } = req.params;
@@ -216,9 +185,6 @@ exports.verifyEmail = async (req, res) => {
 };
 
 
-// =================================================
-// UPDATED: Resend Verification with AWAIT
-// =================================================
 exports.resendVerification = async (req, res) => {
   const { email } = req.body;
 
@@ -256,9 +222,9 @@ exports.resendVerification = async (req, res) => {
     console.log(`✅ New token generated for: ${email}`);
 
     const verifyUrl = `${config.frontendBaseUrl}/verify-email?token=${user.verificationToken}`;
-    console.log(`🔗 Verify URL: ${verifyUrl.substring(0, 50)}...`);
+    console.log(`📧 Verify URL: ${verifyUrl}`);
 
-    // ✅ Send email with proper error handling
+    // Send email with proper error handling
     try {
       console.log(`📨 Attempting to send email to: ${email}`);
       await sendVerificationEmail(user.email, verifyUrl);
@@ -276,32 +242,34 @@ exports.resendVerification = async (req, res) => {
       console.error("Command:", emailError.command);
       console.error("Response:", emailError.response);
       console.error("ResponseCode:", emailError.responseCode);
-      console.error("Stack:", emailError.stack);
 
       // Check for specific error types
       if (emailError.code === "EAUTH") {
         return res.status(500).json({
           msg: "Email authentication failed. Please contact support.",
-          error: process.env.NODE_ENV === "development" 
-            ? "Gmail App Password authentication error" 
-            : undefined,
+          error:
+            process.env.NODE_ENV === "development"
+              ? "Gmail App Password authentication error"
+              : undefined,
         });
       }
 
-      if (emailError.code === "ESOCKET" || emailError.code === "ETIMEDOUT" || emailError.code === "ECONNECTION") {
+      if (emailError.code === "ESOCKET" || emailError.code === "ETIMEDOUT") {
         return res.status(500).json({
-          msg: "Network error sending email. Please try again in a few minutes.",
-          error: process.env.NODE_ENV === "development" 
-            ? `${emailError.code}: ${emailError.message}` 
-            : undefined,
+          msg: "Network error sending email. Please try again.",
+          error:
+            process.env.NODE_ENV === "development"
+              ? "Socket/timeout error"
+              : undefined,
         });
       }
 
       return res.status(500).json({
         msg: "Failed to send verification email. Please try again later.",
-        error: process.env.NODE_ENV === "development" 
-          ? emailError.message 
-          : undefined,
+        error:
+          process.env.NODE_ENV === "development"
+            ? emailError.message
+            : undefined,
       });
     }
   } catch (err) {
@@ -316,59 +284,55 @@ exports.resendVerification = async (req, res) => {
   }
 };
 
-
 exports.getMe = async (req, res) => {
   try {
+    const userId = req.user.id;
+
     // Check cache first
-    const cached = userCache.get(req.user.id);
+    const cached = userCache.get(userId);
     if (cached && cached.expiresAt > Date.now()) {
-      return res.json(cached.user);
+      return res.json({ user: cached.user });
     }
 
-    const user = await User.findById(req.user.id).select("-password");
-    if (!user) return res.status(404).json({ msg: "User not found" });
+    // Cache miss - fetch from DB
+    const user = await User.findById(userId)
+      .select(
+        "-password -googleId -verificationToken -verificationTokenExpires"
+      )
+      .lean();
 
-    // Update cache
-    userCache.set(req.user.id, {
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        isVerified: user.isVerified,
-      },
+    if (!user) {
+      return res.status(404).json({ msg: "User not found" });
+    }
+
+    // Cache the result
+    userCache.set(userId, {
+      user,
       expiresAt: Date.now() + CACHE_TTL,
     });
 
-    res.json(user);
+    res.json({ user });
   } catch (err) {
-    console.error(err);
+    console.error("Error in /me:", err);
     res.status(500).send("Server error");
   }
 };
 
+exports.googleCallback = (req, res) => {
+  const token = generateToken(req.user.id, true); // 30 days for Google login
+  res.redirect(`${config.frontendBaseUrl}/auth/callback?token=${token}`);
+};
 
 exports.updateDeviceToken = async (req, res) => {
   const { deviceToken } = req.body;
-
-  if (!deviceToken) {
-    return res.status(400).json({ msg: "Device token is required" });
-  }
-
   try {
-    const user = await User.findById(req.user.id);
-    if (!user) return res.status(404).json({ msg: "User not found" });
-
-    user.deviceToken = deviceToken;
-    await user.save();
-
-    clearUserCache(user.id);
+    await User.findByIdAndUpdate(req.user.id, { deviceToken });
     res.json({ msg: "Device token updated successfully" });
   } catch (err) {
-    console.error(err);
+    console.error("Error updating device token:", err);
     res.status(500).send("Server error");
   }
 };
-
 
 exports.logout = async (req, res) => {
   try {
@@ -380,8 +344,12 @@ exports.logout = async (req, res) => {
   }
 };
 
-
-exports.googleCallback = (req, res) => {
-  const token = generateToken(req.user.id, true);
-  res.redirect(`${config.frontendBaseUrl}/auth/callback?token=${token}`);
-};
+// Cleanup cache periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, data] of userCache.entries()) {
+    if (data.expiresAt < now) {
+      userCache.delete(userId);
+    }
+  }
+}, 300000);
