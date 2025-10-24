@@ -43,14 +43,14 @@ exports.addAlert = async (req, res) => {
       entry_price,
       stop_loss,
       target_price,
-      trend,
+      position,
       trade_type,
       level,
       sector,
       notes
     } = req.body;
 
-    if (!trading_symbol || !instrument_key || !entry_price || !stop_loss || !target_price || !trend || !trade_type || !level) {
+    if (!trading_symbol || !instrument_key || !entry_price || !stop_loss || !target_price || !position || !trade_type || !level) {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
@@ -61,7 +61,7 @@ exports.addAlert = async (req, res) => {
       entry_price,
       stop_loss,
       target_price,
-      trend,
+      position,
       trade_type,
       level,
       sector,

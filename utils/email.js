@@ -2,10 +2,12 @@ const { Resend } = require('resend');
 const nodemailer = require('nodemailer');
 const config = require('../config/config');
 
+
 // ============================================
 // RESEND CLIENT (For Verification Emails)
 // ============================================
 const resend = new Resend(process.env.RESEND_API_KEY);
+
 
 // ============================================
 // GMAIL SMTP (For Alert Emails)
@@ -35,8 +37,10 @@ const transporter = nodemailer.createTransport({
   debug: process.env.NODE_ENV === 'development'
 });
 
+
 // VERIFY GMAIL CONNECTION ON STARTUP
 let isTransporterReady = false;
+
 
 const verifyTransporter = async () => {
   try {
@@ -51,10 +55,12 @@ const verifyTransporter = async () => {
   }
 };
 
+
 // Verify on module load
 verifyTransporter().catch(err => {
   console.error('Failed to verify Gmail transporter:', err);
 });
+
 
 // Re-verify every 5 minutes
 setInterval(() => {
@@ -62,6 +68,7 @@ setInterval(() => {
     console.error('Periodic Gmail verification failed:', err);
   });
 }, 5 * 60 * 1000);
+
 
 // ============================================
 // VERIFICATION EMAILS (via Resend API)
@@ -109,7 +116,7 @@ exports.sendVerificationEmail = async (to, verifyUrl) => {
             </div>
             <div class="footer">
               &copy; ${new Date().getFullYear()} Stock Notify. All rights reserved.<br>
-              If you have any questions, contact us at support@yourdomain.com
+              If you have any questions, contact us at [support@yourdomain.com](mailto:support@yourdomain.com)
             </div>
           </div>
         </body>
@@ -117,10 +124,12 @@ exports.sendVerificationEmail = async (to, verifyUrl) => {
       `
     });
 
+
     if (error) {
       console.error('❌ Resend API error:', error);
       throw new Error(`Resend error: ${error.message || JSON.stringify(error)}`);
     }
+
 
     console.log(`✅ Verification email sent via Resend to ${to} - ID: ${data.id}`);
     return { success: true, messageId: data.id, provider: 'resend' };
@@ -129,6 +138,7 @@ exports.sendVerificationEmail = async (to, verifyUrl) => {
     throw error;
   }
 };
+
 
 // ============================================
 // ALERT EMAILS (via Gmail SMTP - Existing)
@@ -142,6 +152,7 @@ exports.sendAlertEmailNow = async (userEmail, alertDetails) => {
     }
   }
 
+
   const {
     trading_symbol,
     status,
@@ -149,10 +160,11 @@ exports.sendAlertEmailNow = async (userEmail, alertDetails) => {
     entry_price,
     stop_loss,
     target_price,
-    trend,
+    position,
     trade_type,
     triggered_at
   } = alertDetails;
+
 
   const statusConfig = {
     slHit: {
@@ -178,6 +190,7 @@ exports.sendAlertEmailNow = async (userEmail, alertDetails) => {
     }
   };
 
+
   const configData = statusConfig[status] || statusConfig.enter;
   const formatCurrency = (amount) => `₹${amount.toFixed(2)}`;
   const formatDateTime = (date) => new Date(date).toLocaleString('en-IN', {
@@ -189,6 +202,7 @@ exports.sendAlertEmailNow = async (userEmail, alertDetails) => {
     minute: '2-digit'
   });
 
+
   const calculatePnL = () => {
     if (status === 'slHit' || status === 'targetHit') {
       const pnl = current_price - entry_price;
@@ -198,7 +212,9 @@ exports.sendAlertEmailNow = async (userEmail, alertDetails) => {
     return null;
   };
 
+
   const pnl = calculatePnL();
+
 
   const mailOptions = {
     from: `"Stock Notify Alerts" <${config.emailUser}>`,
@@ -228,9 +244,9 @@ exports.sendAlertEmailNow = async (userEmail, alertDetails) => {
           .price-label { font-size: 12px; color: #6c757d; text-transform: uppercase; font-weight: 600; margin-bottom: 8px; }
           .price-value { font-size: 18px; font-weight: 700; color: #212529; }
           .meta-info { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 20px; }
-          .trend-badge { display: inline-block; padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; text-transform: uppercase; }
-          .trend-bullish { background: #d4edda; color: #155724; }
-          .trend-bearish { background: #f8d7da; color: #721c24; }
+          .position-badge { display: inline-block; padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; text-transform: uppercase; }
+          .position-long { background: #d4edda; color: #155724; }
+          .position-short { background: #f8d7da; color: #721c24; }
           .trade-type { background: #e3f2fd; color: #1565c0; padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; text-transform: uppercase; }
           .pnl-section { background: ${pnl?.isProfit ? '#d4edda' : '#f8d7da'}; color: ${pnl?.isProfit ? '#155724' : '#721c24'}; padding: 15px; border-radius: 8px; margin: 20px 0; text-align: center; }
           .pnl-amount { font-size: 20px; font-weight: 700; }
@@ -283,7 +299,7 @@ exports.sendAlertEmailNow = async (userEmail, alertDetails) => {
                 </div>
               ` : ''}
               <div class="meta-info">
-                <div><strong>Trend:</strong> <span class="trend-badge ${trend === 'bullish' ? 'trend-bullish' : 'trend-bearish'}">${trend}</span></div>
+                <div><strong>Position:</strong> <span class="position-badge ${position === 'long' ? 'position-long' : 'position-short'}">${position}</span></div>
                 <div><strong>Type:</strong> <span class="trade-type">${trade_type}</span></div>
               </div>
             </div>
@@ -306,10 +322,12 @@ exports.sendAlertEmailNow = async (userEmail, alertDetails) => {
     `
   };
 
+
   const info = await transporter.sendMail(mailOptions);
   console.log(`✅ Alert email sent via Gmail to ${userEmail} for ${trading_symbol} - MessageID: ${info.messageId}`);
   return { success: true, messageId: info.messageId, provider: 'gmail' };
 };
+
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
@@ -317,13 +335,15 @@ process.on('SIGTERM', () => {
   console.log('Gmail transporter closed');
 });
 
+
 process.on('SIGINT', () => {
   transporter.close();
   console.log('Gmail transporter closed');
 });
 
+
 // Exports
-exports.transporter = transporter;
+exports.transporter = transporter;  
 exports.verifyTransporter = verifyTransporter;
 exports.isTransporterReady = () => isTransporterReady;
 exports.resendClient = resend;

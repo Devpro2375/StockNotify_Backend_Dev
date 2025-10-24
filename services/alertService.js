@@ -8,6 +8,7 @@ const config = require("../config/config");
 const admin = require("firebase-admin");
 const ioInstance = require("./ioInstance");
 
+
 // ------------------- CONSTANTS -------------------
 const STATUSES = {
   PENDING: "pending",
@@ -18,108 +19,131 @@ const STATUSES = {
   TARGET_HIT: "targetHit",
 };
 
+
 const TRADE_TYPES = {
-  BULLISH: "bullish",
-  BEARISH: "bearish",
+  LONG: "long",
+  SHORT: "short",
 };
 
-// ------------------- BULLISH HELPER FUNCTIONS -------------------
 
-function bullishSlHit(alert, ltp) {
+// ------------------- LONG HELPER FUNCTIONS -------------------
+
+
+function longSlHit(alert, ltp) {
   return ltp <= alert.stop_loss;
 }
 
-function bullishTargetHit(alert, ltp) {
+
+function longTargetHit(alert, ltp) {
   return ltp >= alert.target_price;
 }
 
-function bullishEnterCondition(alert, ltp) {
+
+function longEnterCondition(alert, ltp) {
   return ltp < alert.entry_price && ltp > alert.stop_loss;
 }
 
-function bullishRunningCondition(alert, previous, ltp) {
+
+function longRunningCondition(alert, previous, ltp) {
   return previous < alert.entry_price && ltp >= alert.entry_price;
 }
 
-function bullishNearEntry(alert, ltp) {
+
+function longNearEntry(alert, ltp) {
   const diffPercent = ((ltp - alert.entry_price) / alert.entry_price) * 100;
   return ltp > alert.entry_price && diffPercent <= 1;
 }
 
-function bullishStillRunning(alert, ltp) {
+
+function longStillRunning(alert, ltp) {
   return ltp >= alert.entry_price && ltp < alert.target_price && ltp > alert.stop_loss;
 }
 
-// ------------------- BEARISH HELPER FUNCTIONS -------------------
 
-function bearishSlHit(alert, ltp) {
+// ------------------- SHORT HELPER FUNCTIONS -------------------
+
+
+function shortSlHit(alert, ltp) {
   return ltp >= alert.stop_loss;
 }
 
-function bearishTargetHit(alert, ltp) {
+
+function shortTargetHit(alert, ltp) {
   return ltp <= alert.target_price;
 }
 
-function bearishEnterCondition(alert, ltp) {
+
+function shortEnterCondition(alert, ltp) {
   return ltp > alert.entry_price && ltp < alert.stop_loss;
 }
 
-function bearishRunningCondition(alert, previous, ltp) {
+
+function shortRunningCondition(alert, previous, ltp) {
   return previous > alert.entry_price && ltp <= alert.entry_price;
 }
 
-function bearishNearEntry(alert, ltp) {
+
+function shortNearEntry(alert, ltp) {
   const diffPercent = ((alert.entry_price - ltp) / alert.entry_price) * 100;
   return ltp < alert.entry_price && diffPercent <= 1;
 }
 
-function bearishStillRunning(alert, ltp) {
+
+function shortStillRunning(alert, ltp) {
   return ltp > alert.target_price && ltp < alert.stop_loss;
 }
 
+
 // ------------------- UNIFIED HELPER FUNCTIONS -------------------
 
+
 function isSlHit(alert, ltp) {
-  if (alert.trend === TRADE_TYPES.BEARISH) {
-    return bearishSlHit(alert, ltp);
+  if (alert.position === TRADE_TYPES.SHORT) {
+    return shortSlHit(alert, ltp);
   }
-  return bullishSlHit(alert, ltp);
+  return longSlHit(alert, ltp);
 }
+
 
 function isTargetHit(alert, ltp) {
-  if (alert.trend === TRADE_TYPES.BEARISH) {
-    return bearishTargetHit(alert, ltp);
+  if (alert.position === TRADE_TYPES.SHORT) {
+    return shortTargetHit(alert, ltp);
   }
-  return bullishTargetHit(alert, ltp);
+  return longTargetHit(alert, ltp);
 }
+
 
 function isEnterCondition(alert, ltp) {
-  if (alert.trend === TRADE_TYPES.BEARISH) {
-    return bearishEnterCondition(alert, ltp);
+  if (alert.position === TRADE_TYPES.SHORT) {
+    return shortEnterCondition(alert, ltp);
   }
-  return bullishEnterCondition(alert, ltp);
+  return longEnterCondition(alert, ltp);
 }
+
 
 function isRunningCondition(alert, previous, ltp) {
-  if (alert.trend === TRADE_TYPES.BEARISH) {
-    return bearishRunningCondition(alert, previous, ltp);
+  if (alert.position === TRADE_TYPES.SHORT) {
+    return shortRunningCondition(alert, previous, ltp);
   }
-  return bullishRunningCondition(alert, previous, ltp);
+  return longRunningCondition(alert, previous, ltp);
 }
+
 
 function isNearEntry(alert, ltp) {
-  if (alert.trend === TRADE_TYPES.BEARISH) {
-    return bearishNearEntry(alert, ltp);
+  if (alert.position === TRADE_TYPES.SHORT) {
+    return shortNearEntry(alert, ltp);
   }
-  return bullishNearEntry(alert, ltp);
+  return longNearEntry(alert, ltp);
 }
 
+
 function isStillRunning(alert, ltp) {
-  if (alert.trend === TRADE_TYPES.BEARISH) {
-    return bearishStillRunning(alert, ltp);
+  if (alert.position === TRADE_TYPES.SHORT) {
+    return shortStillRunning(alert, ltp);
   }
-  return bullishStillRunning(alert, ltp);
+  return longStillRunning(alert, ltp);
 }
+
 
 // ------------------- QUEUE SETUP -------------------
 const alertQueue = new Bull("alert-processing", {
@@ -131,29 +155,36 @@ const alertQueue = new Bull("alert-processing", {
   limiter: { max: 1000, duration: 1000 },
 });
 
+
 // ------------------- QUEUE PROCESSOR -------------------
 alertQueue.process(async (job) => {
   const { symbol, tick } = job.data;
   const ltp =
     tick?.fullFeed?.marketFF?.ltpc?.ltp ?? tick?.fullFeed?.indexFF?.ltpc?.ltp;
 
+
   if (!ltp) return;
+
 
   const alerts = await Alert.find({
     instrument_key: symbol,
     status: { $nin: [STATUSES.SL_HIT, STATUSES.TARGET_HIT] },
   }).populate("user");
 
+
   for (const alert of alerts) {
     const user = alert.user;
     if (!user || !user.email) continue;
+
 
     const previous = alert.last_ltp ?? alert.cmp ?? alert.entry_price;
     let newStatus = alert.status ?? STATUSES.PENDING;
     const oldStatus = alert.status;
     let entryCrossedUpdated = alert.entry_crossed || false;
 
+
     // ------------------- STATUS DETERMINATION LOGIC -------------------
+
 
     if (isSlHit(alert, ltp)) {
       newStatus = STATUSES.SL_HIT;
@@ -181,26 +212,32 @@ alertQueue.process(async (job) => {
       }
     }
 
+
     if (newStatus === alert.status && alert.last_ltp === ltp && entryCrossedUpdated === alert.entry_crossed) {
       continue;
     }
+
 
     alert.status = newStatus;
     alert.last_ltp = ltp;
     alert.entry_crossed = entryCrossedUpdated;
     await alert.save();
 
+
     if (newStatus !== oldStatus) {
       console.log(`📊 ${alert.trading_symbol}: ${oldStatus} → ${newStatus} at ₹${ltp} (Entry crossed: ${entryCrossedUpdated})`);
     }
 
+
     // ------------------- NOTIFICATIONS -------------------
+
 
     const emailTriggerStatuses = [
       STATUSES.SL_HIT,
       STATUSES.TARGET_HIT,
       STATUSES.ENTER,
     ];
+
 
     if (emailTriggerStatuses.includes(newStatus) && newStatus !== oldStatus) {
       
@@ -215,7 +252,7 @@ alertQueue.process(async (job) => {
             entry_price: alert.entry_price,
             stop_loss: alert.stop_loss,
             target_price: alert.target_price,
-            trend: alert.trend,
+            position: alert.position,
             trade_type: alert.trade_type,
             level: alert.level,
             triggered_at: new Date(),
@@ -232,6 +269,7 @@ alertQueue.process(async (job) => {
         console.error(`❌ Failed to queue email for alert ${alert._id}:`, error.message);
       });
 
+
       // ------------------- FIREBASE PUSH NOTIFICATION -------------------
       (async () => {
         try {
@@ -239,22 +277,24 @@ alertQueue.process(async (job) => {
             const notificationConfig = {
               slHit: {
                 title: '🛑 Stop Loss Hit',
-                body: `${alert.trading_symbol} at ₹${ltp.toFixed(2)} - ${alert.trend.toUpperCase()}`,
+                body: `${alert.trading_symbol} at ₹${ltp.toFixed(2)} - ${alert.position.toUpperCase()}`,
                 priority: 'high'
               },
               targetHit: {
                 title: '🎯 Target Reached',
-                body: `${alert.trading_symbol} at ₹${ltp.toFixed(2)} - ${alert.trend.toUpperCase()}`,
+                body: `${alert.trading_symbol} at ₹${ltp.toFixed(2)} - ${alert.position.toUpperCase()}`,
                 priority: 'high'
               },
               enter: {
                 title: '🚀 Entry Condition Met',
-                body: `${alert.trading_symbol} at ₹${ltp.toFixed(2)} - ${alert.trend.toUpperCase()}`,
+                body: `${alert.trading_symbol} at ₹${ltp.toFixed(2)} - ${alert.position.toUpperCase()}`,
                 priority: 'high'
               }
             };
 
+
             const notifConfig = notificationConfig[newStatus] || notificationConfig.enter;
+
 
             await admin.messaging().send({
               token: user.deviceToken,
@@ -271,7 +311,7 @@ alertQueue.process(async (job) => {
                 entry_price: alert.entry_price.toString(),
                 stop_loss: alert.stop_loss.toString(),
                 target_price: alert.target_price.toString(),
-                trend: alert.trend,
+                position: alert.position,
                 trade_type: alert.trade_type,
                 entry_crossed: entryCrossedUpdated.toString(),
                 timestamp: new Date().toISOString(),
@@ -327,6 +367,7 @@ alertQueue.process(async (job) => {
         }
       })();
 
+
       // =============== NEW: TELEGRAM NOTIFICATION (QUEUE-BASED) ===============
       if (user.telegramChatId && user.telegramEnabled) {
         telegramQueue.add(
@@ -339,7 +380,7 @@ alertQueue.process(async (job) => {
               entry_price: alert.entry_price,
               stop_loss: alert.stop_loss,
               target_price: alert.target_price,
-              trend: alert.trend,
+              position: alert.position,
               trade_type: alert.trade_type,
               level: alert.level,
               triggered_at: new Date(),
@@ -363,6 +404,7 @@ alertQueue.process(async (job) => {
       }
     }
 
+
     // ------------------- SOCKET.IO LIVE UPDATE -------------------
     const io = ioInstance.getIo();
     if (io) {
@@ -372,10 +414,11 @@ alertQueue.process(async (job) => {
         symbol,
         price: ltp,
         trade_type: alert.trade_type,
-        trend: alert.trend,
+        position: alert.position,
         entry_crossed: entryCrossedUpdated,
         timestamp: new Date().toISOString(),
       });
+
 
       if ([STATUSES.SL_HIT, STATUSES.TARGET_HIT].includes(newStatus) && newStatus !== oldStatus) {
         io.to(`user:${user._id.toString()}`).emit("alert_triggered", {
@@ -385,7 +428,7 @@ alertQueue.process(async (job) => {
           price: ltp,
           status: newStatus,
           trade_type: alert.trade_type,
-          trend: alert.trend,
+          position: alert.position,
           entry_crossed: entryCrossedUpdated,
           timestamp: new Date().toISOString(),
         });
@@ -393,6 +436,7 @@ alertQueue.process(async (job) => {
     }
   }
 });
+
 
 // ------------------- QUEUE CLEANUP -------------------
 setInterval(async () => {
@@ -402,6 +446,7 @@ setInterval(async () => {
   await alertQueue.clean(10000, "active");
   console.log("✅ Alert queue cleaned");
 }, 10000);
+
 
 // ------------------- MIGRATION -------------------
 async function migrateAlerts() {
@@ -437,6 +482,7 @@ async function migrateAlerts() {
   console.log(`✅ Set entry_crossed for ${enteredAlerts.length} entered alerts.`);
   console.log(`✅ Initialized entry_crossed for ${alertsWithoutField.length} alerts.`);
 }
+
 
 module.exports = {
   migrateAlerts,
