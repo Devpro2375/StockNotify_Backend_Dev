@@ -2,14 +2,7 @@ const express = require('express');
 const router = express.Router();
 const telegramService = require('../services/telegramService');
 const User = require('../models/User');
-
-// Passport authentication middleware
-function ensureAuthenticated(req, res, next) {
-  if (req.isAuthenticated()) {
-    return next();
-  }
-  res.status(401).json({ message: 'Authentication required' });
-}
+const authMiddleware = require('../middlewares/authMiddleware'); // ✅ CHANGED: Use JWT middleware
 
 // Webhook endpoint (for production)
 router.post('/webhook', async (req, res) => {
@@ -23,7 +16,7 @@ router.post('/webhook', async (req, res) => {
 });
 
 // Link Telegram account
-router.post('/link', ensureAuthenticated, async (req, res) => {
+router.post('/link', authMiddleware, async (req, res) => { // ✅ CHANGED
   try {
     const { chatId } = req.body;
 
@@ -52,7 +45,7 @@ router.post('/link', ensureAuthenticated, async (req, res) => {
     // Check if already linked to another user
     const existingUser = await User.findOne({ 
       telegramChatId: chatId.toString(),
-      _id: { $ne: req.user.id || req.user._id }
+      _id: { $ne: req.user.id } // ✅ CHANGED: Just req.user.id
     });
 
     if (existingUser) {
@@ -63,7 +56,7 @@ router.post('/link', ensureAuthenticated, async (req, res) => {
 
     // Update user
     const user = await User.findByIdAndUpdate(
-      req.user.id || req.user._id,
+      req.user.id, // ✅ CHANGED: Just req.user.id
       {
         telegramChatId: chatId.toString(),
         telegramEnabled: true,
@@ -75,7 +68,7 @@ router.post('/link', ensureAuthenticated, async (req, res) => {
     // Send confirmation (plain text)
     await telegramService.sendMessage(
       chatId,
-      `✅ Account linked successfully!\n\n👤 User: ${user.name}\n📧 Email: ${user.email}\n\nYou'll now receive real-time stock alerts here. 🚀`
+      `✅ Account linked successfully!\n\n👤 User: ${user.name || user.username}\n📧 Email: ${user.email}\n\nYou'll now receive real-time stock alerts here. 🚀`
     );
 
     res.json({ 
@@ -89,9 +82,9 @@ router.post('/link', ensureAuthenticated, async (req, res) => {
 });
 
 // Unlink Telegram account
-router.post('/unlink', ensureAuthenticated, async (req, res) => {
+router.post('/unlink', authMiddleware, async (req, res) => { // ✅ CHANGED
   try {
-    const user = await User.findById(req.user.id || req.user._id);
+    const user = await User.findById(req.user.id); // ✅ CHANGED
 
     if (!user.telegramChatId) {
       return res.status(400).json({ message: 'No Telegram account linked' });
@@ -119,9 +112,9 @@ router.post('/unlink', ensureAuthenticated, async (req, res) => {
 });
 
 // Get Telegram status
-router.get('/status', ensureAuthenticated, async (req, res) => {
+router.get('/status', authMiddleware, async (req, res) => { // ✅ CHANGED
   try {
-    const user = await User.findById(req.user.id || req.user._id);
+    const user = await User.findById(req.user.id); // ✅ CHANGED
 
     res.json({
       linked: !!user.telegramChatId,
@@ -136,9 +129,9 @@ router.get('/status', ensureAuthenticated, async (req, res) => {
 });
 
 // Toggle Telegram notifications
-router.post('/toggle', ensureAuthenticated, async (req, res) => {
+router.post('/toggle', authMiddleware, async (req, res) => { // ✅ CHANGED
   try {
-    const user = await User.findById(req.user.id || req.user._id);
+    const user = await User.findById(req.user.id); // ✅ CHANGED
 
     if (!user.telegramChatId) {
       return res.status(400).json({ message: 'No Telegram account linked' });
@@ -158,9 +151,9 @@ router.post('/toggle', ensureAuthenticated, async (req, res) => {
 });
 
 // Test notification
-router.post('/test', ensureAuthenticated, async (req, res) => {
+router.post('/test', authMiddleware, async (req, res) => { // ✅ CHANGED
   try {
-    const user = await User.findById(req.user.id || req.user._id);
+    const user = await User.findById(req.user.id); // ✅ CHANGED
 
     if (!user.telegramChatId) {
       return res.status(400).json({ message: 'No Telegram account linked' });
