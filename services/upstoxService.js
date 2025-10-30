@@ -145,14 +145,28 @@ async function connect() {
         await new Promise(resolve => setTimeout(resolve, 2000));
       }
       ws = new WebSocket(url, { followRedirects: true });
-      ws.on("open", () => {
-        console.log("Connected to Upstox WS");
-        reconnectAttempts = 0;
-        resubscribeAll();
-        const io = ioInstance.getIo();
-        if (io) io.emit("ws-reconnected"); // NEW: Notify all clients of successful reconnect
-        resolve();
-      });
+            // In the connect() function, after successful open:
+// In connect() function, update ws.on("open"):
+ws.on("open", async () => {  // NEW: Make the callback async
+  console.log("Connected to Upstox WS");
+  reconnectAttempts = 0;
+  resubscribeAll();
+  const io = ioInstance.getIo();
+  if (io) io.emit("ws-reconnected");
+  
+  // FIXED: Async logging for token expiry (wrap in try-catch for safety)
+  try {
+    const tokenDoc = await AccessToken.findOne();
+    if (tokenDoc?.expires_at) {
+      console.log(`WS connected with token expiring at: ${tokenDoc.expires_at}`);
+    }
+  } catch (err) {
+    console.error('Failed to log token expiry:', err.message);
+  }
+  
+  resolve();
+});
+
       ws.on("message", async (buffer) => {
         try {
           if (!buffer) return;
@@ -177,21 +191,32 @@ async function connect() {
           }
         }
       });
-      ws.on("close", (code, reason) => {
-        console.log(`WS closed: Code ${code}, Reason: ${reason}`);
-        reconnectAttempts++;
-        const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
-        console.log(`Reconnecting in ${delay / 1000} seconds (Attempt ${reconnectAttempts})...`);
-        setTimeout(() => connect().then(resolve).catch(reject), delay);
-      });
-      ws.on("error", (err) => {
-        console.error("WS error:", err.message);
-        if (err.message.includes("403")) {
-          console.error("403 Forbidden: Check for multiple connections or stale sessions. Fetching fresh URL.");
-        }
-        if (ws) ws.close();
-        reject(err);
-      });
+    // In ws.on("error"), enhance 401/403 handling:
+ws.on("error", (err) => {
+  console.error("WS error:", err.message);
+  if (err.message.includes("403") || err.message.includes("401")) {
+    console.error("Auth error (403/401): Token likely expired. Forcing reconnect with fresh token.");
+    // Trigger immediate reconnect attempt
+    reconnectAttempts = 0; // Reset to avoid max attempts
+    if (ws) ws.close();
+    connect().catch(reject); // Chain to existing reject
+  } else if (err.message.includes("403")) {
+    console.error("403 Forbidden: Check for multiple connections or stale sessions. Fetching fresh URL.");
+  }
+  reject(err);
+});
+     // In ws.on("close"), add expiry check before delay:
+ws.on("close", (code, reason) => {
+  console.log(`WS closed: Code ${code}, Reason: ${reason}`);
+  if (code === 1006 || code === 403 || reason.includes("expired")) { // Common expiry codes
+    console.log("Likely token expiry - resetting reconnect attempts for fresh auth");
+    reconnectAttempts = 0;
+  }
+  reconnectAttempts++;
+  const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
+  console.log(`Reconnecting in ${delay / 1000} seconds (Attempt ${reconnectAttempts})...`);
+  setTimeout(() => connect().then(resolve).catch(reject), delay);
+});
     } catch (err) {
       console.error("Connect failed:", err.message);
       reconnectAttempts++;

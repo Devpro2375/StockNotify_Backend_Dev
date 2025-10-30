@@ -180,18 +180,34 @@ cron.schedule('30 6 * * *', async () => {
   console.log(`\n[${ new Date().toISOString()}] 🧪 TEST: Automatic token refresh triggered`);
   console.log(`Current IST time: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n`);
   
-  try {
-    const refresher = new UpstoxTokenRefresh();
-    const result = await refresher.refreshToken();
+   // In the cron.schedule('30 6 * * *', async () => { ... }) block, update the try-catch:
+
+try {
+  const refresher = new UpstoxTokenRefresh();
+  const result = await refresher.refreshToken();
+  
+  if (result.success) {
+    console.log(`[${new Date().toISOString()}] ✅ Token refresh successful - expires at ${result.expiresAt}`);
     
-    if (result.success) {
-      console.log(`[${new Date().toISOString()}] ✅ Token refresh successful - expires at ${result.expiresAt}`);
-    } else {
-      console.error(`[${new Date().toISOString()}] ❌ Token refresh failed:`, result.error);
+    // NEW: Force WS reconnect to use fresh token (import upstoxService if needed)
+    if (upstoxService.ws && upstoxService.ws.readyState === WebSocket.OPEN) {
+      console.log(`[${new Date().toISOString()}] 🔄 Closing WS for token refresh reconnect...`);
+      upstoxService.ws.close(1000, "Token refreshed - reconnecting");
+      // Optional: Wait briefly for clean closure, then trigger connect
+      setTimeout(() => {
+        upstoxService.connect().catch(err => console.error('Reconnect after refresh failed:', err));
+      }, 2000);
+    } else if (upstoxService.ws && upstoxService.ws.readyState !== WebSocket.OPEN) {
+      // If already disconnected, just reconnect
+      upstoxService.connect().catch(err => console.error('Reconnect after refresh failed:', err));
     }
-  } catch (err) {
-    console.error(`[${new Date().toISOString()}] ❌ Token refresh error:`, err.message);
+  } else {
+    console.error(`[${new Date().toISOString()}] ❌ Token refresh failed:`, result.error);
   }
+} catch (err) {
+  console.error(`[${new Date().toISOString()}] ❌ Token refresh error:`, err.message);
+}
+
 }, {
   timezone: "Asia/Kolkata"
 });
