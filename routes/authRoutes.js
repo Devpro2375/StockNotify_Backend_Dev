@@ -27,6 +27,27 @@ router.get('/me', authMiddleware, authController.getMe);
 router.post('/update-token', authMiddleware, authController.updateDeviceToken);
 router.post('/logout', authMiddleware, authController.logout);
 
+// New: Validation for update-profile
+const updateProfileValidation = [
+  check('username').optional().not().isEmpty().withMessage('Username is required'),
+  check('username').optional().isLength({ min: 3, max: 20 }).withMessage('Username must be 3-20 characters'),
+  check('emailAlerts').optional().isBoolean().withMessage('Invalid email alerts preference'),
+  check('pushAlerts').optional().isBoolean().withMessage('Invalid push alerts preference'),
+  check('smsAlerts').optional().isBoolean().withMessage('Invalid SMS alerts preference'),
+];
+
+// New: Validation for change-password
+const changePasswordValidation = [
+  check('currentPassword').not().isEmpty().withMessage('Current password is required'),
+  check('newPassword').not().isEmpty().withMessage('New password is required').isLength({ min: 6 }).withMessage('New password must be at least 6 characters'),
+];
+
+// New: Profile updates
+router.put('/update-profile', updateProfileValidation, authMiddleware, authController.updateProfile);
+
+// New: Password change
+router.put('/change-password', changePasswordValidation, authMiddleware, authController.changePassword);
+
 // Google OAuth
 router.get('/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 

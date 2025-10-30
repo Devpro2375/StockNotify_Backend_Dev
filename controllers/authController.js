@@ -88,26 +88,25 @@ exports.login = async (req, res) => {
     // Generate token based on remember me
     const token = generateToken(user.id, rememberMe);
 
-    // Cache user data
+    // Cache user data (with defaults for prefs)
+    const userWithPrefs = {
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      isVerified: user.isVerified,
+      emailAlerts: user.emailAlerts ?? true,
+      pushAlerts: user.pushAlerts ?? true,
+      smsAlerts: user.smsAlerts ?? false,
+    };
     userCache.set(user.id, {
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        isVerified: user.isVerified,
-      },
+      user: userWithPrefs,
       expiresAt: Date.now() + CACHE_TTL,
     });
 
     res.json({
       token,
       expiresIn: rememberMe ? "30d" : "1d",
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        isVerified: user.isVerified,
-      },
+      user: userWithPrefs,
     });
   } catch (err) {
     console.error(err);
@@ -183,7 +182,6 @@ exports.verifyEmail = async (req, res) => {
     });
   }
 };
-
 
 exports.resendVerification = async (req, res) => {
   const { email } = req.body;
@@ -284,6 +282,7 @@ exports.resendVerification = async (req, res) => {
   }
 };
 
+// Updated: getMe to include notification prefs
 exports.getMe = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -291,10 +290,11 @@ exports.getMe = async (req, res) => {
     // Check cache first
     const cached = userCache.get(userId);
     if (cached && cached.expiresAt > Date.now()) {
-      return res.json({ user: cached.user });
+      const cachedUser = { ...cached.user, emailAlerts: cached.user.emailAlerts ?? true, pushAlerts: cached.user.pushAlerts ?? true, smsAlerts: cached.user.smsAlerts ?? false };
+      return res.json({ user: cachedUser });
     }
 
-    // Cache miss - fetch from DB
+    // Cache miss - fetch from DB with new fields
     const user = await User.findById(userId)
       .select(
         "-password -googleId -verificationToken -verificationTokenExpires"
@@ -305,16 +305,128 @@ exports.getMe = async (req, res) => {
       return res.status(404).json({ msg: "User not found" });
     }
 
+    // Ensure defaults for prefs if missing (for legacy users)
+    const userWithDefaults = {
+      ...user,
+      emailAlerts: user.emailAlerts ?? true,
+      pushAlerts: user.pushAlerts ?? true,
+      smsAlerts: user.smsAlerts ?? false,
+    };
+
     // Cache the result
     userCache.set(userId, {
-      user,
+      user: userWithDefaults,
       expiresAt: Date.now() + CACHE_TTL,
     });
 
-    res.json({ user });
+    res.json({ user: userWithDefaults });
   } catch (err) {
     console.error("Error in /me:", err);
     res.status(500).send("Server error");
+  }
+};
+
+// New: Update profile (username and notifications)
+exports.updateProfile = async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  const { username, emailAlerts, pushAlerts, smsAlerts } = req.body;
+  try {
+    const userId = req.user.id;
+
+    // Check username uniqueness if changed
+    if (username && username !== req.user.username) {
+      const existingUser = await User.findOne({ username });
+      if (existingUser) {
+        return res.status(400).json({ msg: "Username already taken" });
+      }
+    }
+
+    // Update user
+    const updateData = {
+      ...(username && { username }),
+      ...(emailAlerts !== undefined && { emailAlerts }),
+      ...(pushAlerts !== undefined && { pushAlerts }),
+      ...(smsAlerts !== undefined && { smsAlerts }),
+    };
+
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      updateData,
+      { new: true, runValidators: true }
+    ).select("-password -googleId -verificationToken -verificationTokenExpires");
+
+    if (!updatedUser) {
+      return res.status(404).json({ msg: "User not found" });
+    }
+
+    // Clear cache
+    clearUserCache(userId);
+
+    res.json({
+      msg: "Profile updated successfully",
+      user: {
+        id: updatedUser.id,
+        username: updatedUser.username,
+        email: updatedUser.email,
+        isVerified: updatedUser.isVerified,
+        emailAlerts: updatedUser.emailAlerts,
+        pushAlerts: updatedUser.pushAlerts,
+        smsAlerts: updatedUser.smsAlerts,
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ msg: "Server error" });
+  }
+};
+
+// New: Change password
+exports.changePassword = async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  const { currentPassword, newPassword } = req.body;
+  try {
+    const user = await User.findById(req.user.id).select("+password");
+    if (!user) {
+      return res.status(404).json({ msg: "User not found" });
+    }
+
+    // For Google users (no password)
+    if (!user.password) {
+      return res.status(400).json({ msg: "This account uses Google login. Password changes are not supported." });
+    }
+
+    // Verify current password
+    const isMatch = await user.comparePassword(currentPassword);
+    if (!isMatch) {
+      return res.status(400).json({ msg: "Incorrect current password" });
+    }
+
+    // Check new password length
+    if (newPassword.length < 6) {
+      return res.status(400).json({ msg: "New password must be at least 6 characters" });
+    }
+
+    // Update password (pre-save hook will hash)
+    user.password = newPassword;
+    await user.save();
+
+    // Clear cache
+    clearUserCache(req.user.id);
+
+    // Optional: Log out other sessions if needed (e.g., invalidate refreshToken)
+
+    res.json({ msg: "Password updated successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ msg: "Server error" });
   }
 };
 
