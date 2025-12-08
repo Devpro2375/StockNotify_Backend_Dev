@@ -1,4 +1,5 @@
 // controllers/watchlistController.js
+("use strict");
 
 const Watchlist = require("../models/Watchlist");
 const redisService = require("../services/redisService");
@@ -9,14 +10,18 @@ exports.getWatchlist = async (req, res) => {
     const watchlist = await Watchlist.findOne({ user: req.user.id });
     if (!watchlist) return res.json({ symbols: [], prices: {} });
 
-    const symbols = watchlist.symbols; // Array of objects
+    const symbols = watchlist.symbols;
     const prices = {};
 
-    for (let item of symbols) {
-      const symbol = item.instrument_key; // Extract string for ops
+    for (const item of symbols) {
+      const symbol = item.instrument_key;
       let lastPrice = await redisService.getLastClosePrice(symbol);
       if (!lastPrice) {
-        lastPrice = await upstoxService.fetchLastClose(symbol);
+        try {
+          lastPrice = await upstoxService.fetchLastClose(symbol);
+        } catch {
+          lastPrice = null;
+        }
       }
       prices[symbol] = lastPrice;
     }
@@ -80,7 +85,6 @@ exports.removeSymbol = async (req, res) => {
   }
 };
 
-// New for Plan C: LTP snapshot (if not added before)
 exports.getLtpSnapshot = async (req, res) => {
   const { symbols } = req.body;
   if (!symbols || !Array.isArray(symbols))
@@ -88,13 +92,20 @@ exports.getLtpSnapshot = async (req, res) => {
 
   try {
     const prices = {};
-    for (let symbol of symbols) {
+    for (const symbol of symbols) {
       let lastPrice = await redisService.getLastClosePrice(symbol);
-      if (!lastPrice) lastPrice = await upstoxService.fetchLastClose(symbol);
+      if (!lastPrice) {
+        try {
+          lastPrice = await upstoxService.fetchLastClose(symbol);
+        } catch {
+          lastPrice = null;
+        }
+      }
       prices[symbol] = lastPrice?.close ?? null;
     }
     res.json(prices);
   } catch (err) {
+    console.error("getLtpSnapshot error:", err.message);
     res.status(500).json({ error: "Server error" });
   }
 };

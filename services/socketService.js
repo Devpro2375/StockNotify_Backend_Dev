@@ -1,68 +1,35 @@
+// services/socketService.js
+
 const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
 const config = require("../config/config");
+
 const Watchlist = require("../models/Watchlist");
 const Alert = require("../models/Alert");
-const User = require("../models/User");
 const redisService = require("./redisService");
 const upstoxService = require("./upstoxService");
 const ioInstance = require("./ioInstance");
-const emailService = require("../utils/email");
-const alertService = require("./alertService");
-// Constants for statuses
-const STATUSES = {
-  PENDING: "pending",
-  NEAR_ENTRY: "nearEntry",
-  ENTER: "enter",
-  RUNNING: "running",
-  SL_HIT: "slHit",
-  TARGET_HIT: "targetHit",
-};
+const historyService = require("./historyService");
 
-// Migration function (run once to reset old statuses)
-async function migrateAlerts() {
-  const alerts = await Alert.find({ status: { $nin: Object.values(STATUSES) } });
-  for (const alert of alerts) {
-    alert.status = STATUSES.PENDING;
-    alert.last_ltp = null;
-    await alert.save();
-  }
-  console.log(`Migrated ${alerts.length} alerts to pending.`);
-}
-
-// Reusable helper functions for status checks
-function isCrossToRunning(alert, previous, ltp) {
-  return previous <= alert.entry_price && ltp > alert.entry_price;
-}
-
-function isSlHit(alert, ltp) {
-  return ltp < alert.stop_loss;
-}
-
-function isTargetHit(alert, ltp) {
-  return ltp > alert.target_price;
-}
-
-function isEnterCondition(alert, ltp) {
-  return alert.entry_price > ltp && ltp > alert.stop_loss;
-}
-
-function isNearEntry(alert, ltp) {
-  return Math.abs(ltp - alert.entry_price) / alert.entry_price <= 0.02;
-}
+const { STATUSES } = require("./constants");
 
 function init(server) {
   const io = new Server(server, {
-    cors: { origin: "*" },
+    cors: { origin: "*" }, // Keep permissive to avoid WS issues behind proxies; HTTP CORS handles rest
     pingTimeout: 60000,
     pingInterval: 25000,
   });
 
   ioInstance.setIo(io);
-  upstoxService.connect();
 
+  // Ensure WS connection is established to Upstox
+  upstoxService.connect().catch((e) => {
+    console.error("❌ Upstox WS initial connect error:", e.message);
+  });
+
+  // Client auth
   io.use((socket, next) => {
-    const token = socket.handshake.auth.token;
+    const token = socket.handshake.auth?.token;
     if (!token) return next(new Error("Authentication error"));
     try {
       socket.user = jwt.verify(token, config.jwtSecret).user;
@@ -76,17 +43,51 @@ function init(server) {
     console.log(`✅ User connected: ${socket.user.id}`);
     socket.join(`user:${socket.user.id}`);
 
-    // REMOVED: The following loop calling updateAlertStatus
-    // Reason: Alert updates are now handled backend-side via queue in alertService.js
-    // const userAlerts = await Alert.find({ user: socket.user.id });
-    // for (const alert of userAlerts) {
-    //   const lastTick = await redisService.getLastTick(alert.instrument_key);
-    //   if (lastTick) {
-    //     await alertService.updateAlertStatus(alert.instrument_key, lastTick, ioInstance.getIo());
-    //   }
-    // }
+    // Historical data on demand
+    socket.on("request-history", async ({ instrumentKey, interval }) => {
+      const roomName = `history:${instrumentKey}:${interval}`;
+      console.log(
+        `📊 User ${socket.user.id} requesting history: ${instrumentKey} ${interval}`
+      );
+      try {
+        socket.join(roomName);
+        const candles = await historyService.cacheHistoricalData(
+          instrumentKey,
+          interval
+        );
+        socket.emit("history-data", {
+          instrumentKey,
+          interval,
+          candles,
+          timestamp: Date.now(),
+          cached: true,
+        });
+        console.log(
+          `✅ Sent ${candles.length} candles to user ${socket.user.id}`
+        );
+      } catch (err) {
+        console.error(`❌ History error:`, err.message);
+        socket.emit("history-error", {
+          instrumentKey,
+          interval,
+          error: err.message,
+          
+          status: err.status || err.response?.status || null,
+          code: err.code || err.response?.data?.code || null,
+        });
+      }
+    });
 
-    const subscribed = new Set(await redisService.getUserStocks(socket.user.id));
+    socket.on("leave-history", ({ instrumentKey, interval }) => {
+      const roomName = `history:${instrumentKey}:${interval}`;
+      socket.leave(roomName);
+      console.log(`📉 User ${socket.user.id} left history room ${roomName}`);
+    });
+
+    // Subscribe user to existing stocks
+    const subscribed = new Set(
+      await redisService.getUserStocks(socket.user.id)
+    );
 
     for (const symbol of subscribed) {
       socket.join(symbol);
@@ -94,6 +95,7 @@ function init(server) {
       if (lastTick) socket.emit("tick", { symbol, tick: lastTick });
     }
 
+    // Ensure watchlist symbols are tracked
     const watchlist = await Watchlist.findOne({ user: socket.user.id });
     if (watchlist?.symbols) {
       for (const item of watchlist.symbols) {
@@ -112,9 +114,10 @@ function init(server) {
       }
     }
 
+    // Ensure alert-related symbols are tracked
     const alerts = await Alert.find({
       user: socket.user.id,
-      status: { $nin: [STATUSES.SL_HIT, STATUSES.TARGET_HIT] }
+      status: { $nin: [STATUSES.SL_HIT, STATUSES.TARGET_HIT] },
     });
     const alertedSymbols = new Set(alerts.map((a) => a.instrument_key));
 
@@ -132,29 +135,45 @@ function init(server) {
       if (lastTick) socket.emit("tick", { symbol, tick: lastTick });
     }
 
+    // Add stock subscription on demand
     socket.on("addStock", async (symbol) => {
+      console.log(`📈 User ${socket.user.id} requesting addStock: ${symbol}`);
       if (!subscribed.has(symbol)) {
         subscribed.add(symbol);
         await redisService.addUserToStock(socket.user.id, symbol);
-        console.log(`📈 User ${socket.user.id} subscribed to ${symbol}`);
+        console.log(`✅ User ${socket.user.id} subscribed to ${symbol}`);
 
         if ((await redisService.getStockUserCount(symbol)) === 1) {
           upstoxService.subscribe([symbol]);
           console.log(`🌐 First global subscription to ${symbol}`);
 
           if (!(await redisService.getLastTick(symbol))) {
-            const lastClose = await upstoxService.fetchLastClose(symbol);
-            if (lastClose) {
-              await redisService.setLastTick(symbol, {
-                fullFeed: { marketFF: { ltpc: { ltp: lastClose.close } } },
-              });
+            try {
+              const lastClose = await require("./upstoxService").fetchLastClose(
+                symbol
+              );
+              if (lastClose) {
+                await redisService.setLastTick(symbol, {
+                  fullFeed: { marketFF: { ltpc: { ltp: lastClose.close } } },
+                });
+              }
+            } catch (e) {
+              console.warn(
+                `⚠️ Unable to fetch last close for ${symbol}:`,
+                e.message
+              );
             }
           }
         }
       }
       socket.join(symbol);
       const lastTick = await redisService.getLastTick(symbol);
-      if (lastTick) socket.emit("tick", { symbol, tick: lastTick });
+      if (lastTick) {
+        console.log(
+          `📤 Sending last tick to user ${socket.user.id} for ${symbol}`
+        );
+        socket.emit("tick", { symbol, tick: lastTick });
+      }
     });
 
     socket.on("removeStock", async (symbol) => {
@@ -172,24 +191,18 @@ function init(server) {
       socket.leave(symbol);
     });
 
+    // Client-originated tick (e.g. replay/testing)
     socket.on("tick", async ({ symbol, tick }) => {
       await redisService.setLastTick(symbol, tick);
       io.in(symbol).emit("tick", { symbol, tick });
-      // No need for updateAlertStatus here; handled server-side in upstoxService.js
-    });
-
-    // NEW: Handle frontend reconnect notification
-    socket.on("reconnect-request", () => {
-      // Optional: Force resubscribe for this socket
-      // Add logic if needed to re-send last ticks or re-join rooms
     });
 
     socket.on("disconnect", async () => {
       console.log(`❌ User disconnected: ${socket.user.id}`);
       socket.leave(`user:${socket.user.id}`);
 
-      const remainingSockets = await io.in(`user:${socket.user.id}`).fetchSockets();
-      if (remainingSockets.length === 0) {
+      const remaining = await io.in(`user:${socket.user.id}`).fetchSockets();
+      if (remaining.length === 0) {
         await redisService.cleanupUser(socket.user.id);
         console.log(`🧹 Cleaned up data for user: ${socket.user.id}`);
       }
@@ -197,12 +210,4 @@ function init(server) {
   });
 }
 
-async function getStockUsers(symbol) {
-  return await redis.smembers(`stock:${symbol}:users`);
-}
-
-module.exports = {
-  init,
-  migrateAlerts: alertService.migrateAlerts,
-  STATUSES: alertService.STATUSES
-};
+module.exports = { init, STATUSES };

@@ -1,7 +1,17 @@
+const { Resend } = require('resend');
 const nodemailer = require('nodemailer');
 const config = require('../config/config');
 
-// OPTIMIZED TRANSPORTER CONFIGURATION
+
+// ============================================
+// RESEND CLIENT (For Verification Emails)
+// ============================================
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+
+// ============================================
+// GMAIL SMTP (For Alert Emails)
+// ============================================
 const transporter = nodemailer.createTransport({
   host: 'smtp.gmail.com',
   port: 587,
@@ -11,125 +21,137 @@ const transporter = nodemailer.createTransport({
     user: config.emailUser,
     pass: config.emailPass
   },
-  // CRITICAL: Connection pooling for high volume
-  pool: true, // Enable connection pooling
-  maxConnections: 5, // Maximum simultaneous connections
-  maxMessages: Infinity, // Send unlimited messages per connection
-  rateDelta: 1000, // Time window for rate limiting
-  rateLimit: 5, // Max emails per rateDelta
-  // Timeout settings
+  pool: true,
+  maxConnections: 5,
+  maxMessages: Infinity,
+  rateDelta: 1000,
+  rateLimit: 5,
   connectionTimeout: 10000,
   greetingTimeout: 10000,
   socketTimeout: 20000,
-  // Performance optimization
   tls: {
     rejectUnauthorized: true,
     minVersion: 'TLSv1.2'
   },
-  // Logging only in development
   logger: process.env.NODE_ENV === 'development',
   debug: process.env.NODE_ENV === 'development'
 });
 
-// VERIFY CONNECTION ON STARTUP
+
+// VERIFY GMAIL CONNECTION ON STARTUP
 let isTransporterReady = false;
+
 
 const verifyTransporter = async () => {
   try {
     await transporter.verify();
     isTransporterReady = true;
-    console.log('✅ Email transporter verified and ready (Pooled mode with 5 connections)');
+    console.log('✅ Gmail SMTP verified and ready for alerts (Pooled mode with 5 connections)');
     return true;
   } catch (error) {
     isTransporterReady = false;
-    console.error('❌ Email transporter verification failed:', error.message);
+    console.error('❌ Gmail SMTP verification failed:', error.message);
     return false;
   }
 };
 
+
 // Verify on module load
 verifyTransporter().catch(err => {
-  console.error('Failed to verify email transporter on startup:', err);
+  console.error('Failed to verify Gmail transporter:', err);
 });
+
 
 // Re-verify every 5 minutes
 setInterval(() => {
   verifyTransporter().catch(err => {
-    console.error('Periodic email transporter verification failed:', err);
+    console.error('Periodic Gmail verification failed:', err);
   });
 }, 5 * 60 * 1000);
 
-// OPTIMIZED: Simple verification email (no changes needed)
+
+// ============================================
+// VERIFICATION EMAILS (via Resend API)
+// ============================================
 exports.sendVerificationEmail = async (to, verifyUrl) => {
-  if (!isTransporterReady) {
-    await verifyTransporter();
-    if (!isTransporterReady) {
-      throw new Error('Email service not available - SMTP connection failed');
-    }
-  }
-
-  const mailOptions = {
-    from: `"Stock Notify" <${config.emailUser}>`,
-    to,
-    subject: 'Verify Your Email - Stock Notify',
-    html: `
-      <!DOCTYPE html>
-      <html lang="en">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Verify Your Email</title>
-        <style>
-          body { font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 0; color: #333; }
-          .container { max-width: 600px; margin: 40px auto; background: #ffffff; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); padding: 40px; }
-          .header { text-align: center; margin-bottom: 30px; }
-          .header h1 { color: #007bff; font-size: 24px; }
-          .content { font-size: 16px; line-height: 1.5; margin-bottom: 30px; }
-          .button { display: inline-block; background-color: #007bff; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; }
-          .footer { text-align: center; font-size: 12px; color: #777; margin-top: 40px; }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <div class="header">
-            <h1>Welcome to Stock Notify!</h1>
-          </div>
-          <div class="content">
-            <p>Thank you for registering with Stock Notify. To complete your registration and activate your account, please verify your email address by clicking the button below.</p>
-            <p style="text-align: center;">
-              <a href="${verifyUrl}" class="button">Verify My Email</a>
-            </p>
-            <p>If you did not create an account with Stock Notify, please ignore this email.</p>
-            <p>Best regards,<br>Stock Notify Team</p>
-          </div>
-          <div class="footer">
-            &copy; ${new Date().getFullYear()} Stock Notify. All rights reserved.<br>
-            If you have any questions, contact us at support@stocknotify.com.
-          </div>
-        </div>
-      </body>
-      </html>
-    `
-  };
-
   try {
-    const info = await transporter.sendMail(mailOptions);
-    console.log(`✅ Verification email sent to ${to} - MessageID: ${info.messageId}`);
-    return info;
+    console.log(`📧 Sending verification email via Resend to: ${to}`);
+    
+    const { data, error } = await resend.emails.send({
+      from: 'service@stocknotify.in', // Replace with your Hostinger domain
+      to: [to],
+      subject: 'Verify Your Email - Stock Notify',
+      html: `
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Verify Your Email</title>
+          <style>
+            body { font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 0; color: #333; }
+            .container { max-width: 600px; margin: 40px auto; background: #ffffff; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); padding: 40px; }
+            .header { text-align: center; margin-bottom: 30px; }
+            .header h1 { color: #007bff; font-size: 24px; margin: 0; }
+            .content { font-size: 16px; line-height: 1.5; margin-bottom: 30px; }
+            .button { display: inline-block; background-color: #007bff; color: #ffffff; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; }
+            .button:hover { background-color: #0056b3; }
+            .footer { text-align: center; font-size: 12px; color: #777; margin-top: 40px; border-top: 1px solid #eee; padding-top: 20px; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <h1>Welcome to Stock Notify!</h1>
+            </div>
+            <div class="content">
+              <p>Thank you for registering with Stock Notify. To complete your registration and activate your account, please verify your email address by clicking the button below.</p>
+              <p style="text-align: center; margin: 30px 0;">
+                <a href="${verifyUrl}" class="button">Verify My Email</a>
+              </p>
+              <p style="font-size: 14px; color: #666;">If the button doesn't work, copy and paste this link into your browser:</p>
+              <p style="font-size: 12px; word-break: break-all; color: #007bff;">${verifyUrl}</p>
+              <p style="margin-top: 30px;">If you did not create an account with Stock Notify, please ignore this email.</p>
+              <p>Best regards,<br><strong>Stock Notify Team</strong></p>
+            </div>
+            <div class="footer">
+              &copy; ${new Date().getFullYear()} Stock Notify. All rights reserved.<br>
+              If you have any questions, contact us at [support@yourdomain.com](mailto:support@yourdomain.com)
+            </div>
+          </div>
+        </body>
+        </html>
+      `
+    });
+
+
+    if (error) {
+      console.error('❌ Resend API error:', error);
+      throw new Error(`Resend error: ${error.message || JSON.stringify(error)}`);
+    }
+
+
+    console.log(`✅ Verification email sent via Resend to ${to} - ID: ${data.id}`);
+    return { success: true, messageId: data.id, provider: 'resend' };
   } catch (error) {
     console.error(`❌ Failed to send verification email to ${to}:`, error.message);
     throw error;
   }
 };
 
-// OPTIMIZED: Core email sending function (used by queue processor)
+
+// ============================================
+// ALERT EMAILS (via Gmail SMTP - Existing)
+// ============================================
 exports.sendAlertEmailNow = async (userEmail, alertDetails) => {
+  // Verify Gmail connection before sending
   if (!isTransporterReady) {
     await verifyTransporter();
     if (!isTransporterReady) {
-      throw new Error('Email service not available - SMTP connection failed');
+      throw new Error('Gmail SMTP service not available for alerts');
     }
   }
+
 
   const {
     trading_symbol,
@@ -138,10 +160,11 @@ exports.sendAlertEmailNow = async (userEmail, alertDetails) => {
     entry_price,
     stop_loss,
     target_price,
-    trend,
+    position,
     trade_type,
     triggered_at
   } = alertDetails;
+
 
   const statusConfig = {
     slHit: {
@@ -167,6 +190,7 @@ exports.sendAlertEmailNow = async (userEmail, alertDetails) => {
     }
   };
 
+
   const configData = statusConfig[status] || statusConfig.enter;
   const formatCurrency = (amount) => `₹${amount.toFixed(2)}`;
   const formatDateTime = (date) => new Date(date).toLocaleString('en-IN', {
@@ -178,6 +202,7 @@ exports.sendAlertEmailNow = async (userEmail, alertDetails) => {
     minute: '2-digit'
   });
 
+
   const calculatePnL = () => {
     if (status === 'slHit' || status === 'targetHit') {
       const pnl = current_price - entry_price;
@@ -187,7 +212,9 @@ exports.sendAlertEmailNow = async (userEmail, alertDetails) => {
     return null;
   };
 
+
   const pnl = calculatePnL();
+
 
   const mailOptions = {
     from: `"Stock Notify Alerts" <${config.emailUser}>`,
@@ -217,9 +244,9 @@ exports.sendAlertEmailNow = async (userEmail, alertDetails) => {
           .price-label { font-size: 12px; color: #6c757d; text-transform: uppercase; font-weight: 600; margin-bottom: 8px; }
           .price-value { font-size: 18px; font-weight: 700; color: #212529; }
           .meta-info { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 20px; }
-          .trend-badge { display: inline-block; padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; text-transform: uppercase; }
-          .trend-bullish { background: #d4edda; color: #155724; }
-          .trend-bearish { background: #f8d7da; color: #721c24; }
+          .position-badge { display: inline-block; padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; text-transform: uppercase; }
+          .position-long { background: #d4edda; color: #155724; }
+          .position-short { background: #f8d7da; color: #721c24; }
           .trade-type { background: #e3f2fd; color: #1565c0; padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; text-transform: uppercase; }
           .pnl-section { background: ${pnl?.isProfit ? '#d4edda' : '#f8d7da'}; color: ${pnl?.isProfit ? '#155724' : '#721c24'}; padding: 15px; border-radius: 8px; margin: 20px 0; text-align: center; }
           .pnl-amount { font-size: 20px; font-weight: 700; }
@@ -272,7 +299,7 @@ exports.sendAlertEmailNow = async (userEmail, alertDetails) => {
                 </div>
               ` : ''}
               <div class="meta-info">
-                <div><strong>Trend:</strong> <span class="trend-badge ${trend === 'bullish' ? 'trend-bullish' : 'trend-bearish'}">${trend}</span></div>
+                <div><strong>Position:</strong> <span class="position-badge ${position === 'long' ? 'position-long' : 'position-short'}">${position}</span></div>
                 <div><strong>Type:</strong> <span class="trade-type">${trade_type}</span></div>
               </div>
             </div>
@@ -287,7 +314,7 @@ exports.sendAlertEmailNow = async (userEmail, alertDetails) => {
           <div class="footer">
             <p>&copy; ${new Date().getFullYear()} Stock Notify. All rights reserved.</p>
             <p>This is an automated alert notification. Please do not reply to this email.</p>
-            <p>Questions? Contact us at <a href="mailto:support@stocknotify.com">support@stocknotify.com</a></p>
+            <p>Questions? Contact us at <a href="mailto:support@yourdomain.com">support@yourdomain.com</a></p>
           </div>
         </div>
       </body>
@@ -295,23 +322,28 @@ exports.sendAlertEmailNow = async (userEmail, alertDetails) => {
     `
   };
 
-  // Direct send (no retry logic - queue handles retries)
+
   const info = await transporter.sendMail(mailOptions);
-  console.log(`✅ Alert email sent to ${userEmail} for ${trading_symbol} - MessageID: ${info.messageId}`);
-  return { success: true, messageId: info.messageId };
+  console.log(`✅ Alert email sent via Gmail to ${userEmail} for ${trading_symbol} - MessageID: ${info.messageId}`);
+  return { success: true, messageId: info.messageId, provider: 'gmail' };
 };
+
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
   transporter.close();
-  console.log('Email transporter closed');
+  console.log('Gmail transporter closed');
 });
+
 
 process.on('SIGINT', () => {
   transporter.close();
-  console.log('Email transporter closed');
+  console.log('Gmail transporter closed');
 });
 
-exports.transporter = transporter;
+
+// Exports
+exports.transporter = transporter;  
 exports.verifyTransporter = verifyTransporter;
 exports.isTransporterReady = () => isTransporterReady;
+exports.resendClient = resend;

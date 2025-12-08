@@ -1,42 +1,23 @@
 // routes/alerts.js
+"use strict";
 
 const express = require("express");
 const router = express.Router();
 const auth = require("../middlewares/authMiddleware");
+
 const {
   getAlerts,
   addAlert,
-  removeAlert
+  removeAlert,
 } = require("../controllers/alertsController");
 
 // Fetch all alerts for current user
-router.get("/", auth, async (req, res) => {
-  try {
-    await getAlerts(req, res);
-  } catch (error) {
-    console.error("Error in getAlerts route:", error);
-    res.status(500).json({ message: "Internal server error" });
-  }
-});
+router.get("/", auth, (req, res) => getAlerts(req, res));
 
 // Add a new alert
-router.post("/add", auth, async (req, res) => {
-  try {
-    await addAlert(req, res);
-  } catch (error) {
-    console.error("Error in addAlert route:", error);
-    res.status(500).json({ message: "Internal server error" });
-  }
-});
+router.post("/add", auth, (req, res) => addAlert(req, res));
 
-// Remove an alert by id or instrument_key
-router.post("/remove", auth, async (req, res) => {
-  try {
-    await removeAlert(req, res);
-  } catch (error) {
-    console.error("Error in removeAlert route:", error);
-    res.status(500).json({ message: "Internal server error" });
-  }
-});
+// Remove an alert by id
+router.post("/remove", auth, (req, res) => removeAlert(req, res));
 
 module.exports = router;

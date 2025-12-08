@@ -10,26 +10,28 @@ const userSchema = new mongoose.Schema({
   verificationToken: { type: String },
   verificationTokenExpires: { type: Date },
   deviceToken: { type: String },
-  refreshToken: { type: String }, // New: For persistent sessions
+  refreshToken: { type: String }, // For persistent sessions
 
+  // Notification preferences
+  emailAlerts: { type: Boolean, default: true },
+  pushAlerts: { type: Boolean, default: true },
+  smsAlerts: { type: Boolean, default: false },
 
-  // NEW: Telegram fields
+  // Telegram fields (existing)
   telegramChatId: { type: String, default: null, index: true },
   telegramUsername: { type: String, default: null },
   telegramEnabled: { type: Boolean, default: false },
   telegramLinkedAt: { type: Date, default: null },
-  
 }, {
   timestamps: true
 });
 
+// Indexes (existing)
 userSchema.index({ email: 1 });
 userSchema.index({ username: 1 });
 userSchema.index({ verificationToken: 1 });
 
-module.exports = mongoose.model('User', userSchema);
-
-
+// Pre-save hook for password hashing (existing)
 userSchema.pre('save', async function(next) {
   if (this.isModified('password') && this.password) {
     this.password = await bcrypt.hash(this.password, 10);
@@ -37,6 +39,7 @@ userSchema.pre('save', async function(next) {
   next();
 });
 
+// Compare password method (existing)
 userSchema.methods.comparePassword = async function(password) {
   return bcrypt.compare(password, this.password);
 };

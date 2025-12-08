@@ -1,31 +1,49 @@
 // controllers/alertsController.js
+"use strict";
 
 const Alert = require("../models/Alert");
 const redisService = require("../services/redisService");
 const upstoxService = require("../services/upstoxService");
-const { STATUSES } = require("../services/socketService");
+const { STATUSES } = require("../services/constants");
 
-// Get all alerts for the current user
+/**
+ * GET /api/alerts
+ * Return all alerts for authenticated user, with `cmp` hydrated from cache/API.
+ */
 exports.getAlerts = async (req, res) => {
   try {
-    const alerts = await Alert.find({ user: req.user.id }).sort({ created_at: -1 });
-    
-    // FIXED: Populate cmp field with last close prices (matching watchlist logic)
+    const alerts = await Alert.find({ user: req.user.id }).sort({
+      created_at: -1,
+    });
+
+    // Collect all unique instrument keys
+    const instrumentKeys = [...new Set(alerts.map((a) => a.instrument_key))];
+
+    // Bulk fetch from Redis
+    const pricesMap = await redisService.getManyLastClosePrices(instrumentKeys);
+
+    // Hydrate alerts
     const alertsWithCmp = await Promise.all(
       alerts.map(async (alert) => {
-        let lastPrice = await redisService.getLastClosePrice(alert.instrument_key);
+        let lastPrice = pricesMap[alert.instrument_key];
+
+        // Fallback: If not in Redis, try fetching from Upstox (rare case)
         if (!lastPrice) {
-          lastPrice = await upstoxService.fetchLastClose(alert.instrument_key);
+          try {
+            lastPrice = await upstoxService.fetchLastClose(alert.instrument_key);
+            // Update local map to avoid re-fetching for same symbol in this loop (though Set handles unique keys)
+            if (lastPrice) pricesMap[alert.instrument_key] = lastPrice;
+          } catch {
+            lastPrice = null;
+          }
         }
-        
-        // Update the alert's cmp field with the fetched price
-        const alertObj = alert.toObject();
-        alertObj.cmp = lastPrice?.close ?? lastPrice ?? alert.cmp ?? null;
-        
-        return alertObj;
+
+        const obj = alert.toObject();
+        obj.cmp = lastPrice?.close ?? obj.cmp ?? null;
+        return obj;
       })
     );
-    
+
     res.json({ alerts: alertsWithCmp });
   } catch (err) {
     console.error("Error fetching alerts:", err);
@@ -33,53 +51,78 @@ exports.getAlerts = async (req, res) => {
   }
 };
 
-// Add a new alert
+/**
+ * POST /api/alerts/add
+ * Create a new alert for the authenticated user.
+ */
 exports.addAlert = async (req, res) => {
   try {
-    // Validate required fields
     const {
       trading_symbol,
       instrument_key,
       entry_price,
       stop_loss,
       target_price,
-      trend,
+      position,
       trade_type,
       level,
       sector,
-      notes
+      notes,
     } = req.body;
 
-    if (!trading_symbol || !instrument_key || !entry_price || !stop_loss || !target_price || !trend || !trade_type || !level) {
+    // Validation – typed & present
+    if (
+      !trading_symbol ||
+      !instrument_key ||
+      entry_price == null ||
+      stop_loss == null ||
+      target_price == null ||
+      !position ||
+      !trade_type ||
+      level == null
+    ) {
       return res.status(400).json({ message: "Missing required fields" });
+    }
+
+    const numericFields = [
+      "entry_price",
+      "stop_loss",
+      "target_price",
+      "level",
+    ].every((k) => Number.isFinite(Number(req.body[k])));
+    if (!numericFields) {
+      return res.status(400).json({ message: "Invalid numeric fields" });
     }
 
     const newAlert = new Alert({
       user: req.user.id,
       trading_symbol,
       instrument_key,
-      entry_price,
-      stop_loss,
-      target_price,
-      trend,
+      entry_price: Number(entry_price),
+      stop_loss: Number(stop_loss),
+      target_price: Number(target_price),
+      position,
       trade_type,
-      level,
+      level: Number(level),
       sector,
       notes,
       status: STATUSES.PENDING,
-      entry_crossed: false  // NEW: Initialize as false for new alerts
+      entry_crossed: false,
     });
 
     await newAlert.save();
 
-    // Add to persistent stocks for offline processing
+    // Mark as persistent to ensure background processing even if user disconnects
     await redisService.addPersistentStock(newAlert.instrument_key);
 
-    // Subscribe if not already (for immediate tick flow)
+    // Subscribe if needed (first subscriber or persistent)
     if (await redisService.shouldSubscribe(newAlert.instrument_key)) {
       upstoxService.subscribe([newAlert.instrument_key]);
       console.log(`🌐 Subscribed to ${newAlert.instrument_key} for new alert`);
     }
+
+    // Cache the new alert in Redis for high-speed access
+    await redisService.cacheAlert(newAlert);
 
     res.json({ alert: newAlert });
   } catch (err) {
@@ -88,28 +131,40 @@ exports.addAlert = async (req, res) => {
   }
 };
 
-// Remove an alert
+/**
+ * POST /api/alerts/remove
+ * Remove an alert by ID.
+ */
 exports.removeAlert = async (req, res) => {
   try {
     const { id } = req.body;
     if (!id) return res.status(400).json({ message: "Alert ID required" });
 
-    const removedAlert = await Alert.findById(id);
-    if (!removedAlert || removedAlert.user.toString() !== req.user.id) {
+    const alert = await Alert.findById(id);
+    if (!alert || alert.user.toString() !== req.user.id) {
       return res.status(404).json({ message: "Alert not found" });
     }
 
     await Alert.findByIdAndDelete(id);
 
-    // Check if symbol can be removed from persistent
+    // Remove from Redis cache
+    await redisService.removeCachedAlert(alert.instrument_key, id);
+
+    // If nobody else needs this symbol, remove persistence & unsubscribe
     const activeAlerts = await Alert.countDocuments({
-      instrument_key: removedAlert.instrument_key,
-      status: { $nin: [STATUSES.SL_HIT, STATUSES.TARGET_HIT] }
+      instrument_key: alert.instrument_key,
+      status: { $nin: [STATUSES.SL_HIT, STATUSES.TARGET_HIT] },
     });
-    if (activeAlerts === 0 && (await redisService.getStockUserCount(removedAlert.instrument_key)) === 0) {
-      await redisService.removePersistentStock(removedAlert.instrument_key);
-      upstoxService.unsubscribe([removedAlert.instrument_key]);
-      console.log(`❎ Unsubscribed and removed persistent for ${removedAlert.instrument_key}`);
+
+    if (
+      activeAlerts === 0 &&
+      (await redisService.getStockUserCount(alert.instrument_key)) === 0
+    ) {
+      await redisService.removePersistentStock(alert.instrument_key);
+      upstoxService.unsubscribe([alert.instrument_key]);
+      console.log(
+        `❎ Unsubscribed and removed persistent for ${alert.instrument_key}`
+      );
     }
 
     res.json({ message: "Alert removed" });

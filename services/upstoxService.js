@@ -1,51 +1,41 @@
+// services/upstoxService.js
+
 const WebSocket = require("ws");
 const axios = require("axios");
+const Bull = require("bull");
+
 const config = require("../config/config");
 const ioInstance = require("./ioInstance");
 const redisService = require("./redisService");
-const Bull = require('bull');
-const AccessToken = require("../models/AccessToken"); // NEW: Import model
+const AccessToken = require("../models/AccessToken");
 
-// Load Protobuf (unchanged)
+// Protobuf loader (robust fallback path resolution)
 const protoRoot = require("../proto/marketdata.js");
 let FeedResponse;
 try {
-  FeedResponse = protoRoot.com.upstox.marketdatafeederv3udapi.rpc.proto.FeedResponse;
-  console.log("Loaded FeedResponse using exact package path (v3udapi)");
+  FeedResponse =
+    protoRoot.com.upstox.marketdatafeederv3udapi.rpc.proto.FeedResponse ||
+    protoRoot.com.upstox.marketdatafeederv3udapi.proto.FeedResponse ||
+    protoRoot.upstox.proto.FeedResponse ||
+    protoRoot.FeedResponse;
 } catch (e) {
-  try {
-    FeedResponse = protoRoot.com.upstox.marketdatafeederv3udapi.proto.FeedResponse;
-    console.log("Loaded FeedResponse using shorter v3udapi path");
-  } catch (e) {
-    try {
-      FeedResponse = protoRoot.upstox.proto.FeedResponse;
-      console.log("Loaded FeedResponse using upstox.proto path");
-    } catch (e) {
-      try {
-        FeedResponse = protoRoot.FeedResponse;
-        console.log("Loaded FeedResponse using flattened path");
-      } catch (e) {
-        console.error(
-          "Failed to load FeedResponse. protoRoot structure:",
-          JSON.stringify(protoRoot, null, 2)
-        );
-        throw new Error(
-          "Failed to load FeedResponse from compiled proto. Verify compilation and proto package."
-        );
-      }
-    }
-  }
+  // noop; checked below
 }
 if (!FeedResponse || typeof FeedResponse.decode !== "function") {
+  console.error("Failed to load FeedResponse from compiled proto.");
   throw new Error(
-    "FeedResponse loaded but invalid (missing decode method). Check proto compilation."
+    "Invalid compiled proto. Verify build step and package path."
   );
 }
 console.log("FeedResponse loaded successfully with decode method.");
 
-// NEW: Alert queue reference (assuming alertQueue is in alertService, but add to message handler)
-const alertQueue = new Bull('alert-processing', {
-  redis: { host: config.redisHost, port: config.redisPort, password: config.redisPassword }
+// Queue for alert processing; producer here, consumer in alertService
+const alertQueue = new Bull("alert-processing", {
+  redis: {
+    host: config.redisHost,
+    port: config.redisPort,
+    password: config.redisPassword,
+  },
 });
 
 let ws = null;
@@ -56,22 +46,25 @@ const BASE_RECONNECT_DELAY = 5000;
 async function getAccessTokenFromDB() {
   const tokenDoc = await AccessToken.findOne();
   if (!tokenDoc || !tokenDoc.token) {
-    throw new Error("No access token found in database. Please update via admin dashboard.");
+    throw new Error(
+      "No access token found in database. Please update via admin dashboard."
+    );
   }
   return tokenDoc.token;
 }
 
 async function getAuthorizedUrl() {
   try {
-    const accessToken = await getAccessTokenFromDB(); // NEW: Fetch from DB
+    const accessToken = await getAccessTokenFromDB();
     const res = await axios.get(config.upstoxWsAuthUrl, {
-      headers: { Authorization: `Bearer ${accessToken}` }
+      headers: { Authorization: `Bearer ${accessToken}` },
+      timeout: 10000,
     });
-    if (!res.data?.data?.authorized_redirect_uri) {
-      throw new Error("Invalid Upstox auth response");
-    }
-    console.log("Fetched fresh authorized URL");
-    return res.data.data.authorized_redirect_uri;
+    const url = res.data?.data?.authorized_redirect_uri;
+    if (!url)
+      throw new Error("Invalid Upstox WS auth response (no redirect URI)");
+    console.log("Fetched fresh authorized URL for Upstox WS");
+    return url;
   } catch (err) {
     console.error("Failed to fetch authorized URL:", err.message);
     if (err.response?.status === 401) {
@@ -87,27 +80,30 @@ async function resubscribeAll() {
   const allStocks = [...new Set([...globalStocks, ...persistentStocks])];
   for (const symbol of allStocks) {
     if (await redisService.shouldSubscribe(symbol)) {
-      exports.subscribe([symbol]);
+      subscribe([symbol]);
     }
   }
 }
 
 async function fetchLastClose(instrumentKey) {
   try {
-    const accessToken = await getAccessTokenFromDB(); // NEW: Fetch from DB
+    const accessToken = await getAccessTokenFromDB();
+    const baseUrl =
+      config.upstoxBaseUrl || config.upstoxRestUrl || "https://api.upstox.com";
+    const encodedKey = encodeURIComponent(instrumentKey);
     const today = new Date().toISOString().slice(0, 10);
-    const res = await axios.get(
-      // `${config.upstoxRestUrl}/historical/v3/${instrumentKey}/days/1`,
-      {
-        params: { to_date: today },
-        headers: { Authorization: `Bearer ${accessToken}` },
-      }
-    );
-    const candles = res.data.data.candles;
-    if (!candles.length) {
-      // console.warn(`No historical data for ${instrumentKey} on ${today}`);
-      return null;
-    }
+
+    // Use V3 historical-candle endpoint — fetch 1 day: path {to}/{from} with same date
+    const url = `${baseUrl}/v3/historical-candle/${encodedKey}/days/1/${today}/${today}`;
+
+    const res = await axios.get(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      timeout: 10000,
+    });
+
+    const candles = res.data?.data?.candles || [];
+    if (!candles.length) return null;
+
     const last = candles[candles.length - 1];
     const payload = {
       timestamp: last[0],
@@ -117,88 +113,129 @@ async function fetchLastClose(instrumentKey) {
       close: last[4],
       volume: last[5],
     };
+
     await redisService.setLastClosePrice(instrumentKey, payload);
     return payload;
   } catch (err) {
-    // console.error(`Error fetching historical for ${instrumentKey}:`, err.message);
     if (err.response?.status === 404) {
-      console.warn("Symbol may be invalid or no data available. Skipping.");
+      console.warn(`Symbol ${instrumentKey} not found or no data available.`);
     } else if (err.response?.status === 401) {
       console.error("Access token invalid/expired. Regenerate.");
+    } else {
+      console.error(
+        `Error fetching last close for ${instrumentKey}:`,
+        err.message
+      );
     }
     return null;
   }
 }
 
+let connecting = false;
 
 async function connect() {
-  return new Promise(async (resolve, reject) => {
+  if (connecting) return;
+  connecting = true;
+
+  try {
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      console.error("Max reconnect attempts reached. Manual intervention needed.");
-      return reject(new Error("Max reconnect attempts reached"));
+      console.error(
+        "Max reconnect attempts reached. Manual intervention needed."
+      );
+      connecting = false;
+      return;
     }
-    try {
-      const url = await getAuthorizedUrl();
-      if (ws && ws.readyState !== WebSocket.CLOSED) {
-        console.log("Closing existing WebSocket.");
+
+    const url = await getAuthorizedUrl();
+
+    if (ws && ws.readyState !== WebSocket.CLOSED) {
+      try {
         ws.close(1000, "Reconnecting");
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise((r) => setTimeout(r, 2000));
+      } catch {
+        // ignore
       }
-      ws = new WebSocket(url, { followRedirects: true });
-      ws.on("open", () => {
-        console.log("Connected to Upstox WS");
-        reconnectAttempts = 0;
-        resubscribeAll();
+    }
+
+    ws = new WebSocket(url, { followRedirects: true });
+
+    ws.on("open", () => {
+      console.log("Connected to Upstox WS");
+      reconnectAttempts = 0;
+      resubscribeAll();
+      const io = ioInstance.getIo();
+      if (io) io.emit("ws-reconnected");
+      connecting = false;
+    });
+
+    // Throttling maps (persist for the duration of the connection)
+    const lastPushMap = new Map();
+    const lastSocketPushMap = new Map();
+
+    ws.on("message", async (buffer) => {
+      try {
+        if (!buffer) return;
+        const decoded = FeedResponse.decode(buffer);
+        const feeds = decoded?.feeds || {};
         const io = ioInstance.getIo();
-        if (io) io.emit("ws-reconnected"); // NEW: Notify all clients of successful reconnect
-        resolve();
-      });
-      ws.on("message", async (buffer) => {
-        try {
-          if (!buffer) return;
-          const decoded = FeedResponse.decode(buffer);
-          const io = ioInstance.getIo();
-          if (!io || typeof io.in !== "function") {
-            console.error("Socket.io instance not initialized properly.");
-            return;
+        if (!io || typeof io.in !== "function") {
+          console.error("Socket.io instance not initialized properly.");
+          return;
+        }
+
+        for (const symbol of Object.keys(feeds)) {
+          const tick = feeds[symbol];
+          await redisService.setLastTick(symbol, tick);
+
+          const now = Date.now();
+
+          // 1. Alert Queue Throttling (1000ms)
+          const lastPush = lastPushMap.get(symbol) || 0;
+          if (now - lastPush > 1000) {
+            await alertQueue.add({ symbol, tick, timestamp: now });
+            lastPushMap.set(symbol, now);
           }
-          for (let symbol of Object.keys(decoded?.feeds || {})) {
-            const tick = decoded.feeds[symbol];
-            await redisService.setLastTick(symbol, tick);
-            // NEW: Add to alert queue for backend processing (offline-capable)
-            await alertQueue.add({ symbol, tick });
-            // EXISTING: Emit to online users only
+
+          // 2. Socket Emission Throttling (500ms)
+          const lastSocketPush = lastSocketPushMap.get(symbol) || 0;
+          if (now - lastSocketPush > 500) {
             io.in(symbol).emit("tick", { symbol, tick });
-          }
-        } catch (decodeErr) {
-          console.error("Failed to decode WS message:", decodeErr);
-          if (decodeErr.message.includes('OOM')) {
-            await redisService.cleanupStaleStocks();
+            lastSocketPushMap.set(symbol, now);
           }
         }
-      });
-      ws.on("close", (code, reason) => {
-        console.log(`WS closed: Code ${code}, Reason: ${reason}`);
-        reconnectAttempts++;
-        const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
-        console.log(`Reconnecting in ${delay / 1000} seconds (Attempt ${reconnectAttempts})...`);
-        setTimeout(() => connect().then(resolve).catch(reject), delay);
-      });
-      ws.on("error", (err) => {
-        console.error("WS error:", err.message);
-        if (err.message.includes("403")) {
-          console.error("403 Forbidden: Check for multiple connections or stale sessions. Fetching fresh URL.");
+      } catch (decodeErr) {
+        console.error("Failed to decode WS message:", decodeErr.message);
+        if (decodeErr.message.includes("OOM")) {
+          await redisService.cleanupStaleStocks();
         }
-        if (ws) ws.close();
-        reject(err);
-      });
-    } catch (err) {
-      console.error("Connect failed:", err.message);
+      }
+    });
+
+    ws.on("close", (code, reason) => {
+      console.log(`WS closed: Code ${code}, Reason: ${reason}`);
       reconnectAttempts++;
       const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
-      setTimeout(() => connect().then(resolve).catch(reject), delay);
-    }
-  });
+      console.log(
+        `Reconnecting in ${Math.min(
+          delay / 1000,
+          60
+        )} seconds (Attempt ${reconnectAttempts})...`
+      );
+      setTimeout(() => connect().catch(() => { }), Math.min(delay, 60000));
+    });
+
+    ws.on("error", (err) => {
+      console.error("WS error:", err.message);
+      if (ws) ws.close();
+    });
+  } catch (err) {
+    console.error("Connect failed:", err.message);
+    reconnectAttempts++;
+    const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
+    setTimeout(() => connect().catch(() => { }), Math.min(delay, 60000));
+  } finally {
+    connecting = false;
+  }
 }
 
 function sendSubscription(method, symbols) {
@@ -214,21 +251,29 @@ function sendSubscription(method, symbols) {
   );
 }
 
-// NEW: Function to get WS status
 function getWsStatus() {
-  if (!ws) return { connected: false, status: 'Not initialized' };
+  if (!ws) return { connected: false, status: "Not initialized" };
   switch (ws.readyState) {
-    case WebSocket.OPEN: return { connected: true, status: 'Connected' };
-    case WebSocket.CONNECTING: return { connected: false, status: 'Connecting' };
-    case WebSocket.CLOSING: return { connected: false, status: 'Closing' };
-    case WebSocket.CLOSED: return { connected: false, status: 'Disconnected' };
-    default: return { connected: false, status: 'Unknown' };
+    case WebSocket.OPEN:
+      return { connected: true, status: "Connected" };
+    case WebSocket.CONNECTING:
+      return { connected: false, status: "Connecting" };
+    case WebSocket.CLOSING:
+      return { connected: false, status: "Closing" };
+    case WebSocket.CLOSED:
+      return { connected: false, status: "Disconnected" };
+    default:
+      return { connected: false, status: "Unknown" };
   }
 }
 
-// Add these exports here (they belong in this file)
-exports.subscribe = (symbols) => sendSubscription("sub", symbols);
-exports.unsubscribe = (symbols) => sendSubscription("unsub", symbols);
-exports.fetchLastClose = fetchLastClose;
-exports.connect = connect;
-exports.getWsStatus = getWsStatus;
+const subscribe = (symbols) => sendSubscription("sub", symbols);
+const unsubscribe = (symbols) => sendSubscription("unsub", symbols);
+
+module.exports = {
+  subscribe,
+  unsubscribe,
+  fetchLastClose,
+  connect,
+  getWsStatus,
+};

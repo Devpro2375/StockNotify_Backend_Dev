@@ -1,6 +1,8 @@
 // models/Alert.js
 
+
 const mongoose = require("mongoose");
+
 
 const alertSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
@@ -10,7 +12,7 @@ const alertSchema = new mongoose.Schema({
   entry_price: { type: Number, required: true },
   stop_loss: { type: Number, required: true },
   target_price: { type: Number, required: true },
-  trend: { type: String, enum: ["bullish", "bearish"], required: true },
+  position: { type: String, enum: ["long", "short"] },
   trade_type: {
     type: String,
     enum: ["intraday", "swing", "positional"],
@@ -28,5 +30,8 @@ const alertSchema = new mongoose.Schema({
   entry_crossed: { type: Boolean, default: false }, // NEW: Track if entry was ever crossed
   created_at: { type: Date, default: Date.now },
 });
+
+
+alertSchema.index({ instrument_key: 1, status: 1 });
 
 module.exports = mongoose.model("Alert", alertSchema);
