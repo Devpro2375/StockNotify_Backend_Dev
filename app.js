@@ -58,9 +58,9 @@ app.use(express.urlencoded({ extended: true }));
 const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:3001",
-  process.env.FRONTEND_URL,
+  process.env.FRONTEND_BASE_URL,
   config.frontendBaseUrl,
-  "https://www.stocknotify.in/",
+  "https://www.stocknotify.in",
 ].filter(Boolean);
 
 const corsOptions = {
