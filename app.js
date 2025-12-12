@@ -60,7 +60,7 @@ const allowedOrigins = [
   "http://localhost:3001",
   process.env.FRONTEND_URL,
   config.frontendBaseUrl,
-  "https://your-frontend-domain.vercel.app",
+  "https://www.stocknotify.in/",
 ].filter(Boolean);
 
 const corsOptions = {
@@ -224,13 +224,14 @@ mongoose
 ║   🚀 Server running on port ${String(config.port).padEnd(29)}║
 ║   📡 Environment: ${(process.env.NODE_ENV || "development").padEnd(30)}║
 ║   🌐 Frontend URL: ${(
-          config.frontendBaseUrl ||
-          process.env.FRONTEND_URL ||
-          "N/A"
-        ).padEnd(27)}║
+        config.frontendBaseUrl ||
+        process.env.FRONTEND_URL ||
+        "N/A"
+      ).padEnd(27)}║
 ║   📧 Email Worker: ACTIVE                                 ║
-║   🔔 Firebase Push: ${admin?.apps?.length ? "ACTIVE".padEnd(37) : "INACTIVE".padEnd(37)
-        }║
+║   🔔 Firebase Push: ${
+        admin?.apps?.length ? "ACTIVE".padEnd(37) : "INACTIVE".padEnd(37)
+      }║
 ║   📱 Telegram Bot: ${telegramStatus.padEnd(37)}║
 ║   🤖 Bot Username: ${String(botUsername).padEnd(37)}║
 ║   🔌 Upstox WS:   ${ws.status.padEnd(37)}║
