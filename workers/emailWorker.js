@@ -16,7 +16,6 @@ emailQueue.process(async (job) => {
   }
 });
 
-
 console.log('✅ Email worker started and listening for jobs');
 
 module.exports = emailQueue;

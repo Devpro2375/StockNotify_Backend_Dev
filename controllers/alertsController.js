@@ -16,23 +16,17 @@ exports.getAlerts = async (req, res) => {
       created_at: -1,
     });
 
-    // Collect all unique instrument keys
-    const instrumentKeys = [...new Set(alerts.map((a) => a.instrument_key))];
-
-    // Bulk fetch from Redis
-    const pricesMap = await redisService.getManyLastClosePrices(instrumentKeys);
-
-    // Hydrate alerts
     const alertsWithCmp = await Promise.all(
       alerts.map(async (alert) => {
-        let lastPrice = pricesMap[alert.instrument_key];
-
-        // Fallback: If not in Redis, try fetching from Upstox (rare case)
+        let lastPrice = await redisService.getLastClosePrice(
+          alert.instrument_key
+        );
         if (!lastPrice) {
+          // Hardened: tolerate upstream errors
           try {
-            lastPrice = await upstoxService.fetchLastClose(alert.instrument_key);
-            // Update local map to avoid re-fetching for same symbol in this loop (though Set handles unique keys)
-            if (lastPrice) pricesMap[alert.instrument_key] = lastPrice;
+            lastPrice = await upstoxService.fetchLastClose(
+              alert.instrument_key
+            );
           } catch {
             lastPrice = null;
           }
@@ -121,9 +115,6 @@ exports.addAlert = async (req, res) => {
       console.log(`🌐 Subscribed to ${newAlert.instrument_key} for new alert`);
     }
 
-    // Cache the new alert in Redis for high-speed access
-    await redisService.cacheAlert(newAlert);
-
     res.json({ alert: newAlert });
   } catch (err) {
     console.error("Error adding alert:", err);
@@ -146,9 +137,6 @@ exports.removeAlert = async (req, res) => {
     }
 
     await Alert.findByIdAndDelete(id);
-
-    // Remove from Redis cache
-    await redisService.removeCachedAlert(alert.instrument_key, id);
 
     // If nobody else needs this symbol, remove persistence & unsubscribe
     const activeAlerts = await Alert.countDocuments({

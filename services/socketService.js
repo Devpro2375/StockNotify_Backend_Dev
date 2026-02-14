@@ -15,9 +15,13 @@ const { STATUSES } = require("./constants");
 
 function init(server) {
   const io = new Server(server, {
-    cors: { origin: "*" }, // Keep permissive to avoid WS issues behind proxies; HTTP CORS handles rest
+    cors: { origin: "*" },
     pingTimeout: 60000,
     pingInterval: 25000,
+    transports: ["websocket"], // WebSocket only — no HTTP polling overhead
+    allowUpgrades: false,       // Don't fall back to polling
+    perMessageDeflate: true,    // Compress WebSocket frames
+    maxHttpBufferSize: 1e6,     // 1MB max per message
   });
 
   ioInstance.setIo(io);
@@ -40,15 +44,82 @@ function init(server) {
   });
 
   io.on("connection", async (socket) => {
-    console.log(`✅ User connected: ${socket.user.id}`);
-    socket.join(`user:${socket.user.id}`);
+    const userId = socket.user.id;
+    socket.join(`user:${userId}`);
+
+    // ── Parallel DB + Redis queries (was sequential) ──
+    const [watchlist, alerts, existingStocks] = await Promise.all([
+      Watchlist.findOne({ user: userId }).lean(),
+      Alert.find({
+        user: userId,
+        status: { $nin: [STATUSES.SL_HIT, STATUSES.TARGET_HIT] },
+      }).lean(),
+      redisService.getUserStocks(userId),
+    ]);
+
+    // Collect all unique symbols this user needs
+    const subscribed = new Set(existingStocks);
+    const allSymbols = new Set(existingStocks);
+
+    // Add watchlist symbols
+    if (watchlist?.symbols) {
+      for (const item of watchlist.symbols) {
+        allSymbols.add(item.instrument_key);
+      }
+    }
+
+    // Add alert symbols
+    if (alerts.length) {
+      for (const alert of alerts) {
+        allSymbols.add(alert.instrument_key);
+      }
+    }
+
+    // Join all rooms at once
+    for (const symbol of allSymbols) {
+      socket.join(symbol);
+    }
+
+    // Determine which symbols need Redis registration
+    const newSymbols = [];
+    for (const symbol of allSymbols) {
+      if (!subscribed.has(symbol)) {
+        newSymbols.push(symbol);
+      }
+    }
+
+    // Batch register new symbols in Redis
+    if (newSymbols.length) {
+      await Promise.all(
+        newSymbols.map((symbol) => redisService.addUserToStock(userId, symbol))
+      );
+
+      // Check which newly added symbols need Upstox subscription
+      const toSubscribe = [];
+      for (const symbol of newSymbols) {
+        if ((await redisService.getStockUserCount(symbol)) === 1) {
+          toSubscribe.push(symbol);
+        }
+      }
+      if (toSubscribe.length) {
+        upstoxService.subscribe(toSubscribe);
+      }
+    }
+
+    // ── Batch tick retrieval — single Redis round-trip ──
+    const allSymbolsArr = [...allSymbols];
+    if (allSymbolsArr.length) {
+      const ticks = await redisService.getLastTickBatch(allSymbolsArr);
+      for (const symbol of allSymbolsArr) {
+        if (ticks[symbol]) {
+          socket.emit("tick", { symbol, tick: ticks[symbol] });
+        }
+      }
+    }
 
     // Historical data on demand
     socket.on("request-history", async ({ instrumentKey, interval }) => {
       const roomName = `history:${instrumentKey}:${interval}`;
-      console.log(
-        `📊 User ${socket.user.id} requesting history: ${instrumentKey} ${interval}`
-      );
       try {
         socket.join(roomName);
         const candles = await historyService.cacheHistoricalData(
@@ -62,16 +133,12 @@ function init(server) {
           timestamp: Date.now(),
           cached: true,
         });
-        console.log(
-          `✅ Sent ${candles.length} candles to user ${socket.user.id}`
-        );
       } catch (err) {
         console.error(`❌ History error:`, err.message);
         socket.emit("history-error", {
           instrumentKey,
           interval,
           error: err.message,
-          
           status: err.status || err.response?.status || null,
           code: err.code || err.response?.data?.code || null,
         });
@@ -81,77 +148,21 @@ function init(server) {
     socket.on("leave-history", ({ instrumentKey, interval }) => {
       const roomName = `history:${instrumentKey}:${interval}`;
       socket.leave(roomName);
-      console.log(`📉 User ${socket.user.id} left history room ${roomName}`);
     });
-
-    // Subscribe user to existing stocks
-    const subscribed = new Set(
-      await redisService.getUserStocks(socket.user.id)
-    );
-
-    for (const symbol of subscribed) {
-      socket.join(symbol);
-      const lastTick = await redisService.getLastTick(symbol);
-      if (lastTick) socket.emit("tick", { symbol, tick: lastTick });
-    }
-
-    // Ensure watchlist symbols are tracked
-    const watchlist = await Watchlist.findOne({ user: socket.user.id });
-    if (watchlist?.symbols) {
-      for (const item of watchlist.symbols) {
-        const symbol = item.instrument_key;
-        if (!subscribed.has(symbol)) {
-          subscribed.add(symbol);
-          await redisService.addUserToStock(socket.user.id, symbol);
-          if ((await redisService.getStockUserCount(symbol)) === 1) {
-            upstoxService.subscribe([symbol]);
-            console.log(`🌐 First global subscription to ${symbol}`);
-          }
-        }
-        socket.join(symbol);
-        const lastTick = await redisService.getLastTick(symbol);
-        if (lastTick) socket.emit("tick", { symbol, tick: lastTick });
-      }
-    }
-
-    // Ensure alert-related symbols are tracked
-    const alerts = await Alert.find({
-      user: socket.user.id,
-      status: { $nin: [STATUSES.SL_HIT, STATUSES.TARGET_HIT] },
-    });
-    const alertedSymbols = new Set(alerts.map((a) => a.instrument_key));
-
-    for (const symbol of alertedSymbols) {
-      if (!subscribed.has(symbol)) {
-        subscribed.add(symbol);
-        await redisService.addUserToStock(socket.user.id, symbol);
-        if ((await redisService.getStockUserCount(symbol)) === 1) {
-          upstoxService.subscribe([symbol]);
-          console.log(`🌐 First global subscription to ${symbol} for alerts`);
-        }
-      }
-      socket.join(symbol);
-      const lastTick = await redisService.getLastTick(symbol);
-      if (lastTick) socket.emit("tick", { symbol, tick: lastTick });
-    }
 
     // Add stock subscription on demand
     socket.on("addStock", async (symbol) => {
-      console.log(`📈 User ${socket.user.id} requesting addStock: ${symbol}`);
       if (!subscribed.has(symbol)) {
         subscribed.add(symbol);
-        await redisService.addUserToStock(socket.user.id, symbol);
-        console.log(`✅ User ${socket.user.id} subscribed to ${symbol}`);
+        allSymbols.add(symbol);
+        await redisService.addUserToStock(userId, symbol);
 
         if ((await redisService.getStockUserCount(symbol)) === 1) {
           upstoxService.subscribe([symbol]);
-          console.log(`🌐 First global subscription to ${symbol}`);
 
           if (!(await redisService.getLastTick(symbol))) {
             try {
-              const lastClose = await require("./upstoxService").fetchLastClose(
-                symbol
-              );
+              const lastClose = await upstoxService.fetchLastClose(symbol);
               if (lastClose) {
                 await redisService.setLastTick(symbol, {
                   fullFeed: { marketFF: { ltpc: { ltp: lastClose.close } } },
@@ -169,9 +180,6 @@ function init(server) {
       socket.join(symbol);
       const lastTick = await redisService.getLastTick(symbol);
       if (lastTick) {
-        console.log(
-          `📤 Sending last tick to user ${socket.user.id} for ${symbol}`
-        );
         socket.emit("tick", { symbol, tick: lastTick });
       }
     });
@@ -179,13 +187,12 @@ function init(server) {
     socket.on("removeStock", async (symbol) => {
       if (subscribed.has(symbol)) {
         subscribed.delete(symbol);
-        await redisService.removeUserFromStock(socket.user.id, symbol);
-        console.log(`📉 User ${socket.user.id} unsubscribed from ${symbol}`);
+        await redisService.removeUserFromStock(userId, symbol);
 
-        if ((await redisService.getStockUserCount(symbol)) === 0) {
+        // Only unsubscribe from Upstox if no users AND no active alerts
+        if (!(await redisService.shouldSubscribe(symbol))) {
           upstoxService.unsubscribe([symbol]);
           await redisService.removeStockFromGlobal(symbol);
-          console.log(`❎ Last global unsubscription from ${symbol}`);
         }
       }
       socket.leave(symbol);
@@ -198,13 +205,11 @@ function init(server) {
     });
 
     socket.on("disconnect", async () => {
-      console.log(`❌ User disconnected: ${socket.user.id}`);
-      socket.leave(`user:${socket.user.id}`);
+      socket.leave(`user:${userId}`);
 
-      const remaining = await io.in(`user:${socket.user.id}`).fetchSockets();
+      const remaining = await io.in(`user:${userId}`).fetchSockets();
       if (remaining.length === 0) {
-        await redisService.cleanupUser(socket.user.id);
-        console.log(`🧹 Cleaned up data for user: ${socket.user.id}`);
+        await redisService.cleanupUser(userId);
       }
     });
   });

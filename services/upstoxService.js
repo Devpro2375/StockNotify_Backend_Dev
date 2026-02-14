@@ -2,12 +2,12 @@
 
 const WebSocket = require("ws");
 const axios = require("axios");
-const Bull = require("bull");
 
 const config = require("../config/config");
 const ioInstance = require("./ioInstance");
 const redisService = require("./redisService");
 const AccessToken = require("../models/AccessToken");
+const alertQueue = require("../queues/alertQueue");
 
 // Protobuf loader (robust fallback path resolution)
 const protoRoot = require("../proto/marketdata.js");
@@ -29,22 +29,13 @@ if (!FeedResponse || typeof FeedResponse.decode !== "function") {
 }
 console.log("FeedResponse loaded successfully with decode method.");
 
-// Queue for alert processing; producer here, consumer in alertService
-const alertQueue = new Bull("alert-processing", {
-  redis: {
-    host: config.redisHost,
-    port: config.redisPort,
-    password: config.redisPassword,
-  },
-});
-
 let ws = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 10;
 const BASE_RECONNECT_DELAY = 5000;
 
 async function getAccessTokenFromDB() {
-  const tokenDoc = await AccessToken.findOne();
+  const tokenDoc = await AccessToken.findOne().lean();
   if (!tokenDoc || !tokenDoc.token) {
     throw new Error(
       "No access token found in database. Please update via admin dashboard."
@@ -75,13 +66,22 @@ async function getAuthorizedUrl() {
 }
 
 async function resubscribeAll() {
-  const globalStocks = await redisService.getAllGlobalStocks();
-  const persistentStocks = await redisService.getPersistentStocks();
+  const [globalStocks, persistentStocks] = await Promise.all([
+    redisService.getAllGlobalStocks(),
+    redisService.getPersistentStocks(),
+  ]);
   const allStocks = [...new Set([...globalStocks, ...persistentStocks])];
+
+  // Batch subscribe check — collect symbols that need subscription
+  const toSubscribe = [];
   for (const symbol of allStocks) {
     if (await redisService.shouldSubscribe(symbol)) {
-      subscribe([symbol]);
+      toSubscribe.push(symbol);
     }
+  }
+  if (toSubscribe.length) {
+    subscribe(toSubscribe);
+    console.log(`🔄 Re-subscribed to ${toSubscribe.length} symbols`);
   }
 }
 
@@ -93,7 +93,6 @@ async function fetchLastClose(instrumentKey) {
     const encodedKey = encodeURIComponent(instrumentKey);
     const today = new Date().toISOString().slice(0, 10);
 
-    // Use V3 historical-candle endpoint — fetch 1 day: path {to}/{from} with same date
     const url = `${baseUrl}/v3/historical-candle/${encodedKey}/days/1/${today}/${today}`;
 
     const res = await axios.get(url, {
@@ -168,45 +167,47 @@ async function connect() {
       connecting = false;
     });
 
-    // Throttling maps (persist for the duration of the connection)
-    const lastPushMap = new Map();
-    const lastSocketPushMap = new Map();
-
-    ws.on("message", async (buffer) => {
+    // ── HOT PATH — optimized for minimum latency ──
+    ws.on("message", (buffer) => {
       try {
         if (!buffer) return;
         const decoded = FeedResponse.decode(buffer);
-        const feeds = decoded?.feeds || {};
+        const feeds = decoded?.feeds;
+        if (!feeds) return;
+
         const io = ioInstance.getIo();
-        if (!io || typeof io.in !== "function") {
-          console.error("Socket.io instance not initialized properly.");
-          return;
-        }
+        if (!io || typeof io.in !== "function") return;
 
-        for (const symbol of Object.keys(feeds)) {
+        const symbols = Object.keys(feeds);
+        if (!symbols.length) return;
+
+        // 1) Emit to Socket.IO rooms FIRST — this is non-blocking and
+        //    gets data to connected clients with minimal latency.
+        // 2) Fire Redis cache + alert queue in parallel without awaiting
+        //    to keep the event loop free for the next WS message.
+        const promises = [];
+        for (let i = 0; i < symbols.length; i++) {
+          const symbol = symbols[i];
           const tick = feeds[symbol];
-          await redisService.setLastTick(symbol, tick);
 
-          const now = Date.now();
+          // Instant emit — synchronous, non-blocking
+          io.in(symbol).emit("tick", { symbol, tick });
 
-          // 1. Alert Queue Throttling (1000ms)
-          const lastPush = lastPushMap.get(symbol) || 0;
-          if (now - lastPush > 1000) {
-            await alertQueue.add({ symbol, tick, timestamp: now });
-            lastPushMap.set(symbol, now);
-          }
-
-          // 2. Socket Emission Throttling (500ms)
-          const lastSocketPush = lastSocketPushMap.get(symbol) || 0;
-          if (now - lastSocketPush > 500) {
-            io.in(symbol).emit("tick", { symbol, tick });
-            lastSocketPushMap.set(symbol, now);
-          }
+          // Async: cache tick + queue alert check (fire-and-forget)
+          promises.push(
+            redisService.setLastTick(symbol, tick),
+            alertQueue.add({ symbol, tick }, { priority: 2 })
+          );
         }
+
+        // Don't await — let these resolve in the background
+        Promise.all(promises).catch((err) =>
+          console.error("Tick batch error:", err.message)
+        );
       } catch (decodeErr) {
         console.error("Failed to decode WS message:", decodeErr.message);
         if (decodeErr.message.includes("OOM")) {
-          await redisService.cleanupStaleStocks();
+          redisService.cleanupStaleStocks().catch(() => { });
         }
       }
     });

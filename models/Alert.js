@@ -1,8 +1,6 @@
 // models/Alert.js
 
-
 const mongoose = require("mongoose");
-
 
 const alertSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
@@ -27,11 +25,16 @@ const alertSchema = new mongoose.Schema({
     default: "pending",
   },
   last_ltp: { type: Number, default: null },
-  entry_crossed: { type: Boolean, default: false }, // NEW: Track if entry was ever crossed
+  entry_crossed: { type: Boolean, default: false },
   created_at: { type: Date, default: Date.now },
 });
 
-
+// ── Compound indexes for high-frequency query patterns ──
+// Alert processing: finds active alerts by instrument_key (every tick)
 alertSchema.index({ instrument_key: 1, status: 1 });
+// User queries: fetches alerts by user + status (socket connect, API)
+alertSchema.index({ user: 1, status: 1 });
+// Cleanup queries: finds alerts by instrument_key for count checks
+alertSchema.index({ user: 1, instrument_key: 1, status: 1 });
 
 module.exports = mongoose.model("Alert", alertSchema);

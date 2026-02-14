@@ -4,6 +4,7 @@
 const axios = require("axios");
 const redisService = require("../services/redisService");
 const config = require("../config/config");
+const AccessToken = require("../models/AccessToken");
 
 exports.getQuotes = async (req, res) => {
   try {
@@ -63,13 +64,18 @@ exports.getQuotes = async (req, res) => {
             };
           }
 
-          // 3) Final fallback: Upstox API v2 quotes
+          // 3) Final fallback: Upstox API v2 quotes (use dynamic token from DB)
+          const tokenDoc = await AccessToken.findOne().lean();
+          if (!tokenDoc?.token) {
+            console.warn(`No access token available for API fallback`);
+            return { [instrument]: null };
+          }
           const url = `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${encodeURIComponent(
             instrument
           )}`;
           const response = await axios.get(url, {
             headers: {
-              Authorization: `Bearer ${config.upstoxAccessToken}`,
+              Authorization: `Bearer ${tokenDoc.token}`,
               Accept: "application/json",
             },
             timeout: 5000,
