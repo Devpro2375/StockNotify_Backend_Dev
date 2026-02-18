@@ -171,19 +171,22 @@ mongoose
       console.log("✅ Initialized empty AccessToken in DB.");
     }
 
-    // Redis cleanup & warmup — parallelized
-    await redisService.cleanupStaleStocks();
-    const symbols = await redisService.getAllGlobalStocks();
-    if (symbols.length) {
-      console.log("📊 Preloading close prices for:", symbols.length, "symbols");
-      // Parallel preload with concurrency limit to avoid API throttling
-      const BATCH_SIZE = 10;
-      for (let i = 0; i < symbols.length; i += BATCH_SIZE) {
-        const batch = symbols.slice(i, i + BATCH_SIZE);
-        await Promise.allSettled(batch.map((sym) => fetchLastClose(sym)));
+    // Redis cleanup & warmup — wrapped in try-catch so MISCONF doesn't crash startup
+    try {
+      await redisService.cleanupStaleStocks();
+      const symbols = await redisService.getAllGlobalStocks();
+      if (symbols.length) {
+        console.log("📊 Preloading close prices for:", symbols.length, "symbols");
+        const BATCH_SIZE = 10;
+        for (let i = 0; i < symbols.length; i += BATCH_SIZE) {
+          const batch = symbols.slice(i, i + BATCH_SIZE);
+          await Promise.allSettled(batch.map((sym) => fetchLastClose(sym)));
+        }
       }
+      console.log("✅ Preloading complete.");
+    } catch (redisErr) {
+      console.warn("⚠️ Redis warmup failed (server will continue):", redisErr.message);
     }
-    console.log("✅ Preloading complete.");
 
     // ==== CRON JOBS ====
 
