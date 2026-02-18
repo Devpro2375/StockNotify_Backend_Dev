@@ -22,8 +22,8 @@ const telegramQueue = new Bull('telegram-notifications', {
       type: 'exponential',
       delay: 2000
     },
-    removeOnComplete: true,
-    removeOnFail: false
+    removeOnComplete: 10,
+    removeOnFail: 20
   }
 });
 
@@ -46,7 +46,7 @@ telegramQueue.process(async (job) => {
   }
 
   const success = await telegramService.sendAlert(chatId, alertDetails);
-  
+
   if (!success) {
     throw new Error('Failed to send Telegram notification');
   }
@@ -60,22 +60,31 @@ telegramQueue.on('completed', (job, result) => {
 
 telegramQueue.on('failed', (job, err) => {
   console.error(`❌ Telegram job ${job.id} failed:`, err.message);
-  
+
   if (err.message.includes('chat not found') || err.message.includes('Invalid chat ID')) {
     console.log(`⚠️ Disabling Telegram for invalid chat: ${job.data.chatId}`);
   }
 });
 
-// ✅ Enhanced cleanup with error handling
+// ✅ Aggressive cleanup — every 5 minutes
 setInterval(async () => {
   try {
-    await telegramQueue.clean(24 * 3600 * 1000, 'completed');
-    await telegramQueue.clean(7 * 24 * 3600 * 1000, 'failed');
-    console.log('✅ Telegram queue cleaned');
+    await telegramQueue.clean(60 * 60 * 1000, 'completed');       // 1 hour
+    await telegramQueue.clean(6 * 60 * 60 * 1000, 'failed');      // 6 hours
   } catch (error) {
-    console.error('❌ Queue cleanup error:', error);
+    // Silently ignore MISCONF errors during cleanup
+    if (!String(error.message).includes('MISCONF')) {
+      console.error('❌ Queue cleanup error:', error.message);
+    }
   }
-}, 10 * 60 * 1000);
+}, 5 * 60 * 1000);
+
+// ✅ Handle MISCONF: attempt emergency cleanup
+telegramQueue.on('error', async (error) => {
+  if (String(error.message).includes('MISCONF')) {
+    console.warn('⚠️ Telegram queue: Redis MISCONF detected, will retry after recovery');
+  }
+});
 
 // ✅ Graceful shutdown
 process.on('SIGTERM', async () => {

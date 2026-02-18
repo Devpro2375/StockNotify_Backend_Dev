@@ -15,13 +15,13 @@ const emailQueue = new Bull("email-notifications", {
   },
   // Job options
   defaultJobOptions: {
-    attempts: 3, // Retry failed emails up to 3 times
+    attempts: 3,
     backoff: {
       type: 'exponential',
-      delay: 2000, // Start with 2 second delay, then exponential backoff
+      delay: 2000,
     },
-    removeOnComplete: 100, // Keep last 100 completed jobs for monitoring
-    removeOnFail: 500, // Keep last 500 failed jobs for debugging
+    removeOnComplete: 10,
+    removeOnFail: 20,
   },
 });
 
@@ -38,11 +38,16 @@ emailQueue.on('stalled', (job) => {
   console.warn(`⚠️ Email job ${job.id} stalled, will retry`);
 });
 
-// Clean up old jobs every 6 hours
+// ✅ Aggressive cleanup — every 5 minutes
 setInterval(async () => {
-  await emailQueue.clean(24 * 60 * 60 * 1000, 'completed'); // Remove completed jobs older than 24 hours
-  await emailQueue.clean(7 * 24 * 60 * 60 * 1000, 'failed'); // Remove failed jobs older than 7 days
-  console.log('✅ Email queue cleaned');
-}, 6 * 60 * 60 * 1000);
+  try {
+    await emailQueue.clean(60 * 60 * 1000, 'completed');       // 1 hour
+    await emailQueue.clean(6 * 60 * 60 * 1000, 'failed');      // 6 hours
+  } catch (error) {
+    if (!String(error.message).includes('MISCONF')) {
+      console.error('❌ Email queue cleanup error:', error.message);
+    }
+  }
+}, 5 * 60 * 1000);
 
 module.exports = emailQueue;

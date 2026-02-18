@@ -13,24 +13,28 @@ const alertQueue = new Bull("alert-processing", {
   },
   limiter: { max: 2000, duration: 1000 },
   defaultJobOptions: {
-    removeOnComplete: 50,
-    removeOnFail: 200,
+    removeOnComplete: 10,
+    removeOnFail: 20,
     attempts: 1, // ticks are ephemeral — no retry needed
   },
 });
 
 alertQueue.on("error", (err) => {
+  // Suppress MISCONF spam
+  if (String(err.message).includes('MISCONF')) return;
   console.error("❌ Alert queue error:", err.message);
 });
 
-// Periodic cleanup — every 10 minutes
+// Aggressive cleanup — every 5 minutes
 setInterval(async () => {
   try {
-    await alertQueue.clean(60 * 60 * 1000, "completed");
-    await alertQueue.clean(60 * 60 * 1000, "failed");
+    await alertQueue.clean(30 * 60 * 1000, "completed");  // 30 minutes
+    await alertQueue.clean(2 * 60 * 60 * 1000, "failed");  // 2 hours
   } catch (err) {
-    console.error("❌ Alert queue cleanup error:", err.message);
+    if (!String(err.message).includes('MISCONF')) {
+      console.error("❌ Alert queue cleanup error:", err.message);
+    }
   }
-}, 10 * 60 * 1000);
+}, 5 * 60 * 1000);
 
 module.exports = alertQueue;
