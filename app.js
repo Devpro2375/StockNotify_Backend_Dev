@@ -457,8 +457,13 @@ process.on("uncaughtException", (err) => {
 });
 
 process.on("unhandledRejection", (reason, promise) => {
+  // Don't crash on Redis connection-close errors during shutdown
+  const msg = String(reason?.message || reason || "");
+  if (msg.includes("Connection is closed") || msg.includes("ECONNRESET")) {
+    console.warn("⚠️ Suppressed Redis rejection:", msg);
+    return;
+  }
   console.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
-  process.exit(1);
 });
 
 module.exports = { app, server };
