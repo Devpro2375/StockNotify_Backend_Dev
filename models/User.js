@@ -26,13 +26,11 @@ const userSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Indexes (existing)
-userSchema.index({ email: 1 });
-userSchema.index({ username: 1 });
+// Indexes (email & username already indexed via unique: true)
 userSchema.index({ verificationToken: 1 });
 
 // Pre-save hook for password hashing (existing)
-userSchema.pre('save', async function(next) {
+userSchema.pre('save', async function (next) {
   if (this.isModified('password') && this.password) {
     this.password = await bcrypt.hash(this.password, 10);
   }
@@ -40,7 +38,7 @@ userSchema.pre('save', async function(next) {
 });
 
 // Compare password method (existing)
-userSchema.methods.comparePassword = async function(password) {
+userSchema.methods.comparePassword = async function (password) {
   return bcrypt.compare(password, this.password);
 };
 
