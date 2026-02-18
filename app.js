@@ -190,7 +190,7 @@ mongoose
     // 1) Upstox token auto-refresh — daily 6:30 AM IST
     const UpstoxTokenRefresh = require("./services/upstoxTokenRefresh");
     cron.schedule(
-      "* * * * *",
+      "30 6 * * *",
       async () => {
         // ── Heartbeat log ──
         console.log(
