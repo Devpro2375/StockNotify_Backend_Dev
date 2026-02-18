@@ -110,7 +110,7 @@ app.use(
       maxAge: 7 * 24 * 60 * 60 * 1000,
     },
     proxy: true,
-  })
+  }),
 );
 
 // Passport
@@ -190,33 +190,57 @@ mongoose
     // 1) Upstox token auto-refresh — daily 6:30 AM IST
     const UpstoxTokenRefresh = require("./services/upstoxTokenRefresh");
     cron.schedule(
-      "30 6 * * *",
+      "* * * * *",
       async () => {
+        // ── Heartbeat log ──
         console.log(
-          `[${new Date().toISOString()}] 🔄 Upstox token refresh started`
+          `\n[CRON HEARTBEAT] ${new Date().toISOString()} — Upstox token refresh cron FIRED`,
         );
-        try {
-          const refresher = new UpstoxTokenRefresh();
-          const result = await refresher.refreshToken();
-          if (result.success) {
-            console.log(
-              `[${new Date().toISOString()}] ✅ Token refresh successful - expires at ${result.expiresAt
-              }`
-            );
-          } else {
-            console.error(
-              `[${new Date().toISOString()}] ❌ Token refresh failed: ${result.error
-              }`
-            );
-          }
-        } catch (err) {
-          console.error(
-            `[${new Date().toISOString()}] ❌ Token refresh error:`,
-            err.message
+        console.log(
+          `[CRON HEARTBEAT] Timezone: Asia/Kolkata | Local: ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`,
+        );
+
+        const attempt = async (attemptNum) => {
+          console.log(
+            `[${new Date().toISOString()}] 🔄 Upstox token refresh attempt ${attemptNum}`,
           );
+          try {
+            const refresher = new UpstoxTokenRefresh();
+            const result = await refresher.refreshToken();
+            if (result.success) {
+              console.log(
+                `[${new Date().toISOString()}] ✅ Token refresh successful - expires at ${result.expiresAt
+                }`,
+              );
+              return true;
+            } else {
+              console.error(
+                `[${new Date().toISOString()}] ❌ Token refresh failed: ${result.error
+                }`,
+              );
+              return false;
+            }
+          } catch (err) {
+            console.error(
+              `[${new Date().toISOString()}] ❌ Token refresh error:`,
+              err.message,
+            );
+            return false;
+          }
+        };
+
+        // First attempt
+        const ok = await attempt(1);
+        if (!ok) {
+          // Retry once after 30 seconds
+          console.log(
+            `[${new Date().toISOString()}] ⏳ Retrying token refresh in 30s...`,
+          );
+          await new Promise((r) => setTimeout(r, 30_000));
+          await attempt(2);
         }
       },
-      { timezone: "Asia/Kolkata" }
+      { timezone: "Asia/Kolkata" },
     );
     console.log("✅ Upstox token refresh cron scheduled at 6:30 AM IST daily");
 
@@ -267,16 +291,16 @@ mongoose
           const result = await updateInstruments();
           console.log(
             `[${new Date().toISOString()}] ✅ Instrument update complete: ${result.count
-            } instruments (deleted ${result.deleted} old)`
+            } instruments (deleted ${result.deleted} old)`,
           );
         } catch (err) {
           console.error(
             `[${new Date().toISOString()}] ❌ Scheduled instrument update failed:`,
-            err.message
+            err.message,
           );
         }
       },
-      { timezone: "Asia/Kolkata" }
+      { timezone: "Asia/Kolkata" },
     );
     console.log("✅ Instrument update cron scheduled at 6:30 AM IST daily");
 
@@ -331,7 +355,7 @@ mongoose
       if (botInfo) {
         console.log(`📱 Telegram Bot Ready: @${botInfo.username}`);
         console.log(
-          `🔗 Users can start chat: https://t.me/${botInfo.username}`
+          `🔗 Users can start chat: https://t.me/${botInfo.username}`,
         );
       }
     });

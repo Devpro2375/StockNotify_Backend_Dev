@@ -1,29 +1,74 @@
 // services/upstoxTokenRefresh.js
 
-const { spawn } = require("child_process");
+const { spawn, execSync } = require("child_process");
+const path = require("path");
 const AccessToken = require("../models/AccessToken");
 
 class UpstoxTokenRefresh {
+  /**
+   * Find a working Python command.
+   * Priority: /opt/venv/bin/python (Railway venv) → python3 → python
+   */
+  _findPythonCommand() {
+    const candidates = [
+      "/opt/venv/bin/python", // Railway venv (nixpacks)
+      "python3",              // Linux default
+      "python",               // Windows / some Linux
+    ];
+
+    for (const cmd of candidates) {
+      try {
+        execSync(`${cmd} --version`, { stdio: "ignore", timeout: 5000 });
+        console.log(`[Token Refresh] Using Python command: ${cmd}`);
+        return cmd;
+      } catch {
+        // Command not found or failed, try next
+      }
+    }
+
+    throw new Error(
+      "Python not found. Tried: " + candidates.join(", ") +
+      ". Ensure Python is installed and in PATH."
+    );
+  }
+
   async refreshToken() {
     const startTime = Date.now();
+    const TIMEOUT_MS = 120_000; // 2-minute timeout
 
     return new Promise((resolve) => {
       try {
         console.log("[Token Refresh] ========================================");
         console.log(`[Token Refresh] Starting at ${new Date().toISOString()}`);
-        console.log("[Token Refresh] Running Python script...");
 
-        const pythonProcess = spawn(
-          "python",
-          ["python-scripts/refresh_upstox_token.py"],
-          {
-            env: process.env,
-            cwd: process.cwd(),
-          }
-        );
+        // Find a working Python binary
+        let pythonCmd;
+        try {
+          pythonCmd = this._findPythonCommand();
+        } catch (findErr) {
+          console.error(`[Token Refresh] ✗ ${findErr.message}`);
+          console.error("[Token Refresh] ========================================");
+          return resolve({ success: false, error: findErr.message });
+        }
+
+        const scriptPath = path.join("python-scripts", "refresh_upstox_token.py");
+        console.log(`[Token Refresh] Running: ${pythonCmd} ${scriptPath}`);
+
+        const pythonProcess = spawn(pythonCmd, [scriptPath], {
+          env: process.env,
+          cwd: process.cwd(),
+        });
 
         let output = "";
         let errorOutput = "";
+
+        // Timeout guard — kill the process if it runs too long
+        const timer = setTimeout(() => {
+          console.error(
+            `[Token Refresh] ✗ Timeout after ${TIMEOUT_MS / 1000}s — killing process`
+          );
+          pythonProcess.kill("SIGKILL");
+        }, TIMEOUT_MS);
 
         pythonProcess.stdout.on("data", (data) => {
           const text = data.toString();
@@ -41,6 +86,7 @@ class UpstoxTokenRefresh {
         });
 
         pythonProcess.on("close", async (code) => {
+          clearTimeout(timer);
           const duration = ((Date.now() - startTime) / 1000).toFixed(2);
 
           if (code === 0) {
@@ -86,6 +132,7 @@ class UpstoxTokenRefresh {
             console.error(
               `[Token Refresh] ✗ Python script failed with code ${code}`
             );
+            console.error(`[Token Refresh] stderr: ${errorOutput}`);
             console.error(`[Token Refresh] Duration: ${duration}s`);
             console.error(
               "[Token Refresh] ========================================"
@@ -100,6 +147,7 @@ class UpstoxTokenRefresh {
         });
 
         pythonProcess.on("error", (error) => {
+          clearTimeout(timer);
           console.error(
             "[Token Refresh] ✗ Failed to spawn Python process:",
             error.message
