@@ -7,28 +7,60 @@ const AccessToken = require("../models/AccessToken");
 class UpstoxTokenRefresh {
   /**
    * Find a working Python command.
-   * Priority: /opt/venv/bin/python (Railway venv) → python3 → python
+   * Windows: python → py → python3
+   * Linux:   /opt/venv/bin/python3 → /opt/venv/bin/python → python3 → python
    */
   _findPythonCommand() {
-    const candidates = [
-      "/opt/venv/bin/python", // Railway venv (nixpacks)
-      "python3",              // Linux default
-      "python",               // Windows / some Linux
-    ];
+    const fs = require("fs");
+
+    const candidates =
+      process.platform === "win32"
+        ? ["python", "py", "python3"]
+        : [
+          "/opt/venv/bin/python3", // Railway venv (nixpacks) — python3 symlink
+          "/opt/venv/bin/python",  // Railway venv (nixpacks) — python symlink
+          "python3",               // Linux system
+          "python",                // Fallback
+        ];
 
     for (const cmd of candidates) {
       try {
-        execSync(`${cmd} --version`, { stdio: "ignore", timeout: 5000 });
-        console.log(`[Token Refresh] Using Python command: ${cmd}`);
+        // For absolute paths, check file exists first
+        if (cmd.startsWith("/") && !fs.existsSync(cmd)) {
+          console.log(`[Token Refresh] ${cmd} does not exist, skipping`);
+          continue;
+        }
+        execSync(`${cmd} --version`, {
+          stdio: "pipe",
+          timeout: 5000,
+          shell: true,
+        });
+        console.log(`[Token Refresh] ✓ Using Python command: ${cmd}`);
         return cmd;
-      } catch {
-        // Command not found or failed, try next
+      } catch (err) {
+        console.log(`[Token Refresh] ✗ ${cmd} failed: ${err.message?.split("\n")[0]}`);
       }
     }
 
+    // Diagnostic info for debugging on Railway
+    console.error("[Token Refresh] === PYTHON DIAGNOSTIC INFO ===");
+    console.error(`[Token Refresh] Platform: ${process.platform}`);
+    console.error(`[Token Refresh] PATH: ${process.env.PATH}`);
+    try {
+      const venvDir = "/opt/venv/bin";
+      if (fs.existsSync(venvDir)) {
+        console.error(`[Token Refresh] ${venvDir} contents: ${fs.readdirSync(venvDir).join(", ")}`);
+      } else {
+        console.error(`[Token Refresh] ${venvDir} does NOT exist`);
+      }
+    } catch (e) {
+      console.error(`[Token Refresh] Could not list venv dir: ${e.message}`);
+    }
+    console.error("[Token Refresh] =============================");
+
     throw new Error(
       "Python not found. Tried: " + candidates.join(", ") +
-      ". Ensure Python is installed and in PATH."
+      ". Check Railway build logs — the venv may not have been created."
     );
   }
 
@@ -57,6 +89,7 @@ class UpstoxTokenRefresh {
         const pythonProcess = spawn(pythonCmd, [scriptPath], {
           env: process.env,
           cwd: process.cwd(),
+          shell: true, // Required on Windows for PATH resolution
         });
 
         let output = "";
