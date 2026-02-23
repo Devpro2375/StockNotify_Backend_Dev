@@ -1,4 +1,13 @@
 // services/upstoxService.js
+// ──────────────────────────────────────────────────────────────
+// REFACTORED: Optimized tick hot path
+//  1. Extract LTP ONCE per symbol at decode time
+//  2. Dedup unchanged LTP before broadcast (saves Socket.IO bandwidth)
+//  3. Call alertService.processTickAlerts() via setImmediate() instead
+//     of Bull queue — eliminates Redis serialize/deserialize roundtrip
+//  4. Batch resubscribe with pipelined shouldSubscribe checks
+//  5. Added jitter to reconnect backoff to prevent thundering herd
+// ──────────────────────────────────────────────────────────────
 
 const WebSocket = require("ws");
 const axios = require("axios");
@@ -7,9 +16,17 @@ const config = require("../config/config");
 const ioInstance = require("./ioInstance");
 const redisService = require("./redisService");
 const AccessToken = require("../models/AccessToken");
-const alertQueue = require("../queues/alertQueue");
+const logger = require("../utils/logger");
+const metrics = require("../utils/metrics");
 
-// Protobuf loader (robust fallback path resolution)
+// Lazy-load alertService to avoid circular dependency at module load
+let _alertService = null;
+function getAlertService() {
+  if (!_alertService) _alertService = require("./alertService");
+  return _alertService;
+}
+
+// Protobuf loader
 const protoRoot = require("../proto/marketdata.js");
 let FeedResponse;
 try {
@@ -19,27 +36,27 @@ try {
     protoRoot.upstox.proto.FeedResponse ||
     protoRoot.FeedResponse;
 } catch (e) {
-  // noop; checked below
+  // checked below
 }
 if (!FeedResponse || typeof FeedResponse.decode !== "function") {
-  console.error("Failed to load FeedResponse from compiled proto.");
-  throw new Error(
-    "Invalid compiled proto. Verify build step and package path."
-  );
+  logger.error("Failed to load FeedResponse from compiled proto.");
+  throw new Error("Invalid compiled proto. Verify build step and package path.");
 }
-console.log("FeedResponse loaded successfully with decode method.");
+logger.info("FeedResponse loaded successfully");
 
 let ws = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 10;
 const BASE_RECONNECT_DELAY = 5000;
 
+// ── LTP dedup for Socket.IO broadcast ──
+// Prevents emitting identical ticks to rooms when price hasn't changed
+const lastBroadcastLtp = new Map();
+
 async function getAccessTokenFromDB() {
   const tokenDoc = await AccessToken.findOne().lean();
   if (!tokenDoc || !tokenDoc.token) {
-    throw new Error(
-      "No access token found in database. Please update via admin dashboard."
-    );
+    throw new Error("No access token found in database. Please update via admin dashboard.");
   }
   return tokenDoc.token;
 }
@@ -52,15 +69,11 @@ async function getAuthorizedUrl() {
       timeout: 10000,
     });
     const url = res.data?.data?.authorized_redirect_uri;
-    if (!url)
-      throw new Error("Invalid Upstox WS auth response (no redirect URI)");
-    console.log("Fetched fresh authorized URL for Upstox WS");
+    if (!url) throw new Error("Invalid Upstox WS auth response (no redirect URI)");
+    logger.info("Fetched authorized URL for Upstox WS");
     return url;
   } catch (err) {
-    console.error("Failed to fetch authorized URL:", err.message);
-    if (err.response?.status === 401) {
-      console.error("Access token expired! Regenerate it.");
-    }
+    logger.error("Failed to fetch authorized URL", { error: err.message, status: err.response?.status });
     throw err;
   }
 }
@@ -71,28 +84,22 @@ async function resubscribeAll() {
     redisService.getPersistentStocks(),
   ]);
   const allStocks = [...new Set([...globalStocks, ...persistentStocks])];
+  if (!allStocks.length) return;
 
-  // Batch subscribe check — collect symbols that need subscription
-  const toSubscribe = [];
-  for (const symbol of allStocks) {
-    if (await redisService.shouldSubscribe(symbol)) {
-      toSubscribe.push(symbol);
-    }
-  }
+  // Batch check which symbols need subscription using pipeline
+  const toSubscribe = await redisService.filterSubscribable(allStocks);
   if (toSubscribe.length) {
     subscribe(toSubscribe);
-    console.log(`🔄 Re-subscribed to ${toSubscribe.length} symbols`);
+    logger.info(`Re-subscribed to ${toSubscribe.length} symbols after reconnect`);
   }
 }
 
 async function fetchLastClose(instrumentKey) {
   try {
     const accessToken = await getAccessTokenFromDB();
-    const baseUrl =
-      config.upstoxBaseUrl || config.upstoxRestUrl || "https://api.upstox.com";
+    const baseUrl = config.upstoxBaseUrl || config.upstoxRestUrl || "https://api.upstox.com";
     const encodedKey = encodeURIComponent(instrumentKey);
     const today = new Date().toISOString().slice(0, 10);
-
     const url = `${baseUrl}/v3/historical-candle/${encodedKey}/days/1/${today}/${today}`;
 
     const res = await axios.get(url, {
@@ -117,17 +124,19 @@ async function fetchLastClose(instrumentKey) {
     return payload;
   } catch (err) {
     if (err.response?.status === 404) {
-      console.warn(`Symbol ${instrumentKey} not found or no data available.`);
+      logger.warn(`Symbol ${instrumentKey} not found or no data available`);
     } else if (err.response?.status === 401) {
-      console.error("Access token invalid/expired. Regenerate.");
+      logger.error("Access token invalid/expired for fetchLastClose");
     } else {
-      console.error(
-        `Error fetching last close for ${instrumentKey}:`,
-        err.message
-      );
+      logger.error(`Error fetching last close for ${instrumentKey}`, { error: err.message });
     }
     return null;
   }
+}
+
+// ── Helper: extract LTP from decoded tick ──
+function extractLtp(tick) {
+  return tick?.fullFeed?.marketFF?.ltpc?.ltp ?? tick?.fullFeed?.indexFF?.ltpc?.ltp ?? null;
 }
 
 let connecting = false;
@@ -138,9 +147,7 @@ async function connect() {
 
   try {
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      console.error(
-        "Max reconnect attempts reached. Manual intervention needed."
-      );
+      logger.error("Max reconnect attempts reached. Manual intervention needed.");
       connecting = false;
       return;
     }
@@ -159,12 +166,12 @@ async function connect() {
     ws = new WebSocket(url, { followRedirects: true });
 
     ws.on("open", () => {
-      console.log("Connected to Upstox WS");
+      logger.info("Connected to Upstox WS");
       reconnectAttempts = 0;
+      connecting = false;
       resubscribeAll();
       const io = ioInstance.getIo();
       if (io) io.emit("ws-reconnected");
-      connecting = false;
     });
 
     // ── HOT PATH — optimized for minimum latency ──
@@ -176,66 +183,67 @@ async function connect() {
         if (!feeds) return;
 
         const io = ioInstance.getIo();
-        if (!io || typeof io.in !== "function") return;
-
         const symbols = Object.keys(feeds);
         if (!symbols.length) return;
 
-        // 1) Emit to Socket.IO rooms FIRST — this is non-blocking and
-        //    gets data to connected clients with minimal latency.
-        // 2) Fire Redis cache + alert queue in parallel without awaiting
-        //    to keep the event loop free for the next WS message.
-        const promises = [];
+        metrics.inc("ws_ticks_received", symbols.length);
+
         for (let i = 0; i < symbols.length; i++) {
           const symbol = symbols[i];
           const tick = feeds[symbol];
 
-          // Instant emit — synchronous, non-blocking
-          io.in(symbol).emit("tick", { symbol, tick });
+          // Extract LTP once
+          const ltp = extractLtp(tick);
+          const ltpNum = typeof ltp === "number" ? ltp : Number(ltp);
 
-          // Async: cache tick + queue alert check (fire-and-forget)
-          promises.push(
-            redisService.setLastTick(symbol, tick),
-            alertQueue.add({ symbol, tick }, { priority: 2 })
-          );
+          // 1) Buffer tick for Redis (synchronous, non-blocking)
+          redisService.setLastTick(symbol, tick);
+
+          // 2) Dedup before Socket.IO broadcast — skip if LTP unchanged
+          if (io && ltpNum && lastBroadcastLtp.get(symbol) !== ltpNum) {
+            lastBroadcastLtp.set(symbol, ltpNum);
+            // Emit full tick object for clients that need OHLC data
+            io.in(symbol).emit("tick", { symbol, tick });
+          }
+
+          // 3) Process alerts directly via setImmediate (non-blocking)
+          //    This replaces the Bull queue path entirely.
+          if (ltpNum && !Number.isNaN(ltpNum)) {
+            setImmediate(() => {
+              getAlertService().processTickAlerts(symbol, ltpNum).catch((err) =>
+                logger.error("Alert processing error", { symbol, error: err.message })
+              );
+            });
+          }
         }
-
-        // Don't await — let these resolve in the background
-        Promise.all(promises).catch((err) =>
-          console.error("Tick batch error:", err.message)
-        );
       } catch (decodeErr) {
-        console.error("Failed to decode WS message:", decodeErr.message);
-        if (decodeErr.message.includes("OOM")) {
-          redisService.cleanupStaleStocks().catch(() => { });
-        }
+        logger.error("Failed to decode WS message", { error: decodeErr.message });
       }
     });
 
     ws.on("close", (code, reason) => {
-      console.log(`WS closed: Code ${code}, Reason: ${reason}`);
+      logger.warn(`WS closed: Code ${code}, Reason: ${reason}`);
+      connecting = false;
       reconnectAttempts++;
-      const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
-      console.log(
-        `Reconnecting in ${Math.min(
-          delay / 1000,
-          60
-        )} seconds (Attempt ${reconnectAttempts})...`
-      );
-      setTimeout(() => connect().catch(() => { }), Math.min(delay, 60000));
+      // Exponential backoff with jitter to prevent thundering herd
+      const baseDelay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
+      const jitter = Math.random() * 2000;
+      const delay = Math.min(baseDelay + jitter, 60000);
+      logger.info(`Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${reconnectAttempts})`);
+      setTimeout(() => connect().catch(() => {}), delay);
     });
 
     ws.on("error", (err) => {
-      console.error("WS error:", err.message);
+      logger.error("WS error", { error: err.message });
       if (ws) ws.close();
     });
   } catch (err) {
-    console.error("Connect failed:", err.message);
-    reconnectAttempts++;
-    const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
-    setTimeout(() => connect().catch(() => { }), Math.min(delay, 60000));
-  } finally {
+    logger.error("Connect failed", { error: err.message });
     connecting = false;
+    reconnectAttempts++;
+    const baseDelay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
+    const jitter = Math.random() * 2000;
+    setTimeout(() => connect().catch(() => {}), Math.min(baseDelay + jitter, 60000));
   }
 }
 
@@ -254,18 +262,13 @@ function sendSubscription(method, symbols) {
 
 function getWsStatus() {
   if (!ws) return { connected: false, status: "Not initialized" };
-  switch (ws.readyState) {
-    case WebSocket.OPEN:
-      return { connected: true, status: "Connected" };
-    case WebSocket.CONNECTING:
-      return { connected: false, status: "Connecting" };
-    case WebSocket.CLOSING:
-      return { connected: false, status: "Closing" };
-    case WebSocket.CLOSED:
-      return { connected: false, status: "Disconnected" };
-    default:
-      return { connected: false, status: "Unknown" };
-  }
+  const states = {
+    [WebSocket.OPEN]: { connected: true, status: "Connected" },
+    [WebSocket.CONNECTING]: { connected: false, status: "Connecting" },
+    [WebSocket.CLOSING]: { connected: false, status: "Closing" },
+    [WebSocket.CLOSED]: { connected: false, status: "Disconnected" },
+  };
+  return states[ws.readyState] || { connected: false, status: "Unknown" };
 }
 
 const subscribe = (symbols) => sendSubscription("sub", symbols);

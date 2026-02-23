@@ -5,86 +5,69 @@ const Alert = require("../models/Alert");
 const redisService = require("../services/redisService");
 const upstoxService = require("../services/upstoxService");
 const { STATUSES } = require("../services/constants");
+const logger = require("../utils/logger");
+const { refreshAlertCache } = require("../services/alertService");
 
 /**
  * GET /api/alerts
  * Return all alerts for authenticated user, with `cmp` hydrated from cache/API.
+ * REFACTORED: Uses batch Redis lookup instead of N sequential calls.
  */
 exports.getAlerts = async (req, res) => {
   try {
-    const alerts = await Alert.find({ user: req.user.id }).sort({
-      created_at: -1,
-    });
+    const alerts = await Alert.find({ user: req.user.id }).sort({ created_at: -1 });
 
-    const alertsWithCmp = await Promise.all(
-      alerts.map(async (alert) => {
-        let lastPrice = await redisService.getLastClosePrice(
-          alert.instrument_key
-        );
-        if (!lastPrice) {
-          // Hardened: tolerate upstream errors
-          try {
-            lastPrice = await upstoxService.fetchLastClose(
-              alert.instrument_key
-            );
-          } catch {
-            lastPrice = null;
-          }
+    // Batch fetch close prices in one Redis round-trip
+    const instrumentKeys = [...new Set(alerts.map((a) => a.instrument_key))];
+    const closePrices = await redisService.getLastClosePriceBatch(instrumentKeys);
+
+    // For any missing prices, fetch from API in parallel
+    const missing = instrumentKeys.filter((k) => !closePrices[k]);
+    if (missing.length) {
+      const fetched = await Promise.allSettled(
+        missing.map((k) => upstoxService.fetchLastClose(k))
+      );
+      for (let i = 0; i < missing.length; i++) {
+        if (fetched[i].status === "fulfilled" && fetched[i].value) {
+          closePrices[missing[i]] = fetched[i].value;
         }
+      }
+    }
 
-        const obj = alert.toObject();
-        obj.cmp = lastPrice?.close ?? obj.cmp ?? null;
-        return obj;
-      })
-    );
+    const alertsWithCmp = alerts.map((alert) => {
+      const obj = alert.toObject();
+      obj.cmp = closePrices[alert.instrument_key]?.close ?? obj.cmp ?? null;
+      return obj;
+    });
 
     res.json({ alerts: alertsWithCmp });
   } catch (err) {
-    console.error("Error fetching alerts:", err);
+    logger.error("Error fetching alerts", { error: err.message });
     res.status(500).json({ message: "Server error" });
   }
 };
 
 /**
  * POST /api/alerts/add
- * Create a new alert for the authenticated user.
  */
 exports.addAlert = async (req, res) => {
   try {
     const {
-      trading_symbol,
-      instrument_key,
-      entry_price,
-      stop_loss,
-      target_price,
-      position,
-      trade_type,
-      level,
-      sector,
-      notes,
+      trading_symbol, instrument_key, entry_price, stop_loss,
+      target_price, position, trade_type, level, sector, notes,
     } = req.body;
 
-    // Validation – typed & present
     if (
-      !trading_symbol ||
-      !instrument_key ||
-      entry_price == null ||
-      stop_loss == null ||
-      target_price == null ||
-      !position ||
-      !trade_type ||
-      level == null
+      !trading_symbol || !instrument_key ||
+      entry_price == null || stop_loss == null || target_price == null ||
+      !position || !trade_type || level == null
     ) {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
-    const numericFields = [
-      "entry_price",
-      "stop_loss",
-      "target_price",
-      "level",
-    ].every((k) => Number.isFinite(Number(req.body[k])));
-    if (!numericFields) {
+    const numericValid = ["entry_price", "stop_loss", "target_price", "level"]
+      .every((k) => Number.isFinite(Number(req.body[k])));
+    if (!numericValid) {
       return res.status(400).json({ message: "Invalid numeric fields" });
     }
 
@@ -106,25 +89,27 @@ exports.addAlert = async (req, res) => {
 
     await newAlert.save();
 
-    // Mark as persistent to ensure background processing even if user disconnects
+    // Mark persistent + subscribe in parallel
     await redisService.addPersistentStock(newAlert.instrument_key);
-
-    // Subscribe if needed (first subscriber or persistent)
     if (await redisService.shouldSubscribe(newAlert.instrument_key)) {
       upstoxService.subscribe([newAlert.instrument_key]);
-      console.log(`🌐 Subscribed to ${newAlert.instrument_key} for new alert`);
+      logger.info(`Subscribed to ${newAlert.instrument_key} for new alert`);
     }
+
+    // Immediately refresh alert cache so new alert is active on next tick
+    refreshAlertCache().catch((err) =>
+      logger.error("Cache refresh after addAlert failed", { error: err.message })
+    );
 
     res.json({ alert: newAlert });
   } catch (err) {
-    console.error("Error adding alert:", err);
+    logger.error("Error adding alert", { error: err.message });
     res.status(500).json({ message: "Server error" });
   }
 };
 
 /**
  * POST /api/alerts/remove
- * Remove an alert by ID.
  */
 exports.removeAlert = async (req, res) => {
   try {
@@ -138,26 +123,26 @@ exports.removeAlert = async (req, res) => {
 
     await Alert.findByIdAndDelete(id);
 
-    // If nobody else needs this symbol, remove persistence & unsubscribe
+    // Check if symbol still needed
     const activeAlerts = await Alert.countDocuments({
       instrument_key: alert.instrument_key,
       status: { $nin: [STATUSES.SL_HIT, STATUSES.TARGET_HIT] },
     });
 
-    if (
-      activeAlerts === 0 &&
-      (await redisService.getStockUserCount(alert.instrument_key)) === 0
-    ) {
+    if (activeAlerts === 0 && (await redisService.getStockUserCount(alert.instrument_key)) === 0) {
       await redisService.removePersistentStock(alert.instrument_key);
       upstoxService.unsubscribe([alert.instrument_key]);
-      console.log(
-        `❎ Unsubscribed and removed persistent for ${alert.instrument_key}`
-      );
+      logger.info(`Unsubscribed and removed persistent for ${alert.instrument_key}`);
     }
+
+    // Immediately refresh alert cache so deleted alert stops processing
+    refreshAlertCache().catch((err) =>
+      logger.error("Cache refresh after removeAlert failed", { error: err.message })
+    );
 
     res.json({ message: "Alert removed" });
   } catch (err) {
-    console.error("Error removing alert:", err);
+    logger.error("Error removing alert", { error: err.message });
     res.status(500).json({ message: "Server error" });
   }
 };

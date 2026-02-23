@@ -3,9 +3,13 @@
 
 const axios = require("axios");
 const redisService = require("../services/redisService");
-const config = require("../config/config");
 const AccessToken = require("../models/AccessToken");
+const logger = require("../utils/logger");
 
+/**
+ * GET /api/market-data/quotes
+ * REFACTORED: Batch tick + close lookups, single token fetch for API fallback.
+ */
 exports.getQuotes = async (req, res) => {
   try {
     const { instruments } = req.query;
@@ -19,94 +23,97 @@ exports.getQuotes = async (req, res) => {
     if (!instrumentList.length)
       return res.status(400).json({ error: "No instruments provided" });
 
-    const results = await Promise.all(
-      instrumentList.map(async (instrument) => {
-        try {
-          // 1) Attempt last tick (real-time)
-          const lastTick = await redisService.getLastTick(instrument);
-          const ltp =
-            lastTick?.fullFeed?.marketFF?.ltpc?.ltp ??
-            lastTick?.fullFeed?.indexFF?.ltpc?.ltp ??
-            null;
+    // Batch fetch ticks + close prices in two Redis round-trips
+    const [ticks, closePrices] = await Promise.all([
+      redisService.getLastTickBatch(instrumentList),
+      redisService.getLastClosePriceBatch(instrumentList),
+    ]);
 
-          if (ltp != null) {
-            return {
-              [instrument]: {
-                last_price: ltp,
-                ohlc: {
-                  open:
-                    lastTick?.fullFeed?.marketFF?.marketOHLC?.ohlc?.open ?? ltp,
-                  high:
-                    lastTick?.fullFeed?.marketFF?.marketOHLC?.ohlc?.high ?? ltp,
-                  low:
-                    lastTick?.fullFeed?.marketFF?.marketOHLC?.ohlc?.low ?? ltp,
-                  close: ltp,
-                },
-                source: "realtime",
-              },
-            };
-          }
+    // Lazy-load token only if needed for API fallback
+    let accessToken = null;
 
-          // 2) Fallback: last close cache
-          const lastClose = await redisService.getLastClosePrice(instrument);
-          if (lastClose) {
-            return {
-              [instrument]: {
-                last_price: lastClose.close,
-                ohlc: {
-                  open: lastClose.open,
-                  high: lastClose.high,
-                  low: lastClose.low,
-                  close: lastClose.close,
-                },
-                source: "historical",
-              },
-            };
-          }
+    const quotes = {};
+    for (const instrument of instrumentList) {
+      // 1) Real-time tick
+      const lastTick = ticks[instrument];
+      if (lastTick) {
+        const ltp =
+          lastTick?.fullFeed?.marketFF?.ltpc?.ltp ??
+          lastTick?.fullFeed?.indexFF?.ltpc?.ltp ??
+          null;
 
-          // 3) Final fallback: Upstox API v2 quotes (use dynamic token from DB)
-          const tokenDoc = await AccessToken.findOne().lean();
-          if (!tokenDoc?.token) {
-            console.warn(`No access token available for API fallback`);
-            return { [instrument]: null };
-          }
-          const url = `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${encodeURIComponent(
-            instrument
-          )}`;
-          const response = await axios.get(url, {
-            headers: {
-              Authorization: `Bearer ${tokenDoc.token}`,
-              Accept: "application/json",
+        if (ltp != null) {
+          quotes[instrument] = {
+            last_price: ltp,
+            ohlc: {
+              open: lastTick?.fullFeed?.marketFF?.marketOHLC?.ohlc?.open ?? ltp,
+              high: lastTick?.fullFeed?.marketFF?.marketOHLC?.ohlc?.high ?? ltp,
+              low: lastTick?.fullFeed?.marketFF?.marketOHLC?.ohlc?.low ?? ltp,
+              close: ltp,
             },
-            timeout: 5000,
-          });
-
-          if (response.data?.data?.[instrument]) {
-            const data = response.data.data[instrument];
-            return {
-              [instrument]: {
-                last_price: data.last_price,
-                ohlc: data.ohlc,
-                source: "upstox_api",
-              },
-            };
-          }
-
-          return { [instrument]: null };
-        } catch (error) {
-          console.error(
-            `Failed to fetch quote for ${instrument}:`,
-            error.message
-          );
-          return { [instrument]: null };
+            source: "realtime",
+          };
+          continue;
         }
-      })
-    );
+      }
 
-    const quotes = results.reduce((acc, curr) => Object.assign(acc, curr), {});
+      // 2) Close price cache
+      const lastClose = closePrices[instrument];
+      if (lastClose) {
+        quotes[instrument] = {
+          last_price: lastClose.close,
+          ohlc: {
+            open: lastClose.open,
+            high: lastClose.high,
+            low: lastClose.low,
+            close: lastClose.close,
+          },
+          source: "historical",
+        };
+        continue;
+      }
+
+      // 3) API fallback (lazy token load)
+      try {
+        if (!accessToken) {
+          const tokenDoc = await AccessToken.findOne().lean();
+          accessToken = tokenDoc?.token || null;
+        }
+        if (!accessToken) {
+          quotes[instrument] = null;
+          continue;
+        }
+
+        const url = `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${encodeURIComponent(instrument)}`;
+        const response = await axios.get(url, {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            Accept: "application/json",
+          },
+          timeout: 5000,
+        });
+
+        if (response.data?.data?.[instrument]) {
+          const data = response.data.data[instrument];
+          quotes[instrument] = {
+            last_price: data.last_price,
+            ohlc: data.ohlc,
+            source: "upstox_api",
+          };
+        } else {
+          quotes[instrument] = null;
+        }
+      } catch (error) {
+        logger.warn(`Failed to fetch quote for ${instrument}`, {
+          error: error.message,
+        });
+        quotes[instrument] = null;
+      }
+    }
+
     res.json(quotes);
   } catch (error) {
-    console.error("Market data API error:", error);
+    logger.error("Market data API error", { error: error.message });
     res.status(500).json({ error: "Internal server error" });
   }
 };

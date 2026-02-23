@@ -1,34 +1,42 @@
 // controllers/watchlistController.js
-("use strict");
+"use strict";
 
 const Watchlist = require("../models/Watchlist");
 const redisService = require("../services/redisService");
 const upstoxService = require("../services/upstoxService");
+const logger = require("../utils/logger");
 
+/**
+ * GET /api/watchlist
+ * REFACTORED: Uses batch Redis lookup instead of N sequential calls.
+ */
 exports.getWatchlist = async (req, res) => {
   try {
     const watchlist = await Watchlist.findOne({ user: req.user.id });
     if (!watchlist) return res.json({ symbols: [], prices: {} });
 
     const symbols = watchlist.symbols;
-    const prices = {};
+    const instrumentKeys = symbols.map((s) => s.instrument_key);
 
-    for (const item of symbols) {
-      const symbol = item.instrument_key;
-      let lastPrice = await redisService.getLastClosePrice(symbol);
-      if (!lastPrice) {
-        try {
-          lastPrice = await upstoxService.fetchLastClose(symbol);
-        } catch {
-          lastPrice = null;
+    // Batch fetch in one Redis round-trip
+    const closePrices = await redisService.getLastClosePriceBatch(instrumentKeys);
+
+    // Fetch missing from API in parallel
+    const missing = instrumentKeys.filter((k) => !closePrices[k]);
+    if (missing.length) {
+      const fetched = await Promise.allSettled(
+        missing.map((k) => upstoxService.fetchLastClose(k))
+      );
+      for (let i = 0; i < missing.length; i++) {
+        if (fetched[i].status === "fulfilled" && fetched[i].value) {
+          closePrices[missing[i]] = fetched[i].value;
         }
       }
-      prices[symbol] = lastPrice;
     }
 
-    res.json({ symbols, prices });
+    res.json({ symbols, prices: closePrices });
   } catch (err) {
-    console.error("Error in getWatchlist:", err.message);
+    logger.error("Error in getWatchlist", { error: err.message });
     res.status(500).send("Server error");
   }
 };
@@ -54,7 +62,7 @@ exports.addSymbol = async (req, res) => {
 
     res.json(watchlist.symbols);
   } catch (err) {
-    console.error("Error in addSymbol:", err);
+    logger.error("Error in addSymbol", { error: err.message });
     res.status(500).send("Server error");
   }
 };
@@ -72,40 +80,50 @@ exports.removeSymbol = async (req, res) => {
       await watchlist.save();
 
       await redisService.removeUserFromStock(req.user.id, instrument_key);
-      const userCount = await redisService.getStockUserCount(instrument_key);
-      if (userCount === 0) {
+      if (!(await redisService.shouldSubscribe(instrument_key))) {
         upstoxService.unsubscribe([instrument_key]);
         await redisService.removeStockFromGlobal(instrument_key);
       }
     }
     res.json(watchlist ? watchlist.symbols : []);
   } catch (err) {
-    console.error("Error in removeSymbol:", err);
+    logger.error("Error in removeSymbol", { error: err.message });
     res.status(500).send("Server error");
   }
 };
 
+/**
+ * POST /api/watchlist/ltp-snapshot
+ * REFACTORED: Batch Redis lookup.
+ */
 exports.getLtpSnapshot = async (req, res) => {
   const { symbols } = req.body;
   if (!symbols || !Array.isArray(symbols))
     return res.status(400).json({ error: "symbols array required" });
 
   try {
-    const prices = {};
-    for (const symbol of symbols) {
-      let lastPrice = await redisService.getLastClosePrice(symbol);
-      if (!lastPrice) {
-        try {
-          lastPrice = await upstoxService.fetchLastClose(symbol);
-        } catch {
-          lastPrice = null;
+    const closePrices = await redisService.getLastClosePriceBatch(symbols);
+
+    // Fetch missing
+    const missing = symbols.filter((s) => !closePrices[s]);
+    if (missing.length) {
+      const fetched = await Promise.allSettled(
+        missing.map((k) => upstoxService.fetchLastClose(k))
+      );
+      for (let i = 0; i < missing.length; i++) {
+        if (fetched[i].status === "fulfilled" && fetched[i].value) {
+          closePrices[missing[i]] = fetched[i].value;
         }
       }
-      prices[symbol] = lastPrice?.close ?? null;
+    }
+
+    const prices = {};
+    for (const symbol of symbols) {
+      prices[symbol] = closePrices[symbol]?.close ?? null;
     }
     res.json(prices);
   } catch (err) {
-    console.error("getLtpSnapshot error:", err.message);
+    logger.error("getLtpSnapshot error", { error: err.message });
     res.status(500).json({ error: "Server error" });
   }
 };

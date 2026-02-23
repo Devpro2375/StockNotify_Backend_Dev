@@ -1,6 +1,12 @@
 // queues/alertQueue.js
-// Single shared Bull queue for alert processing.
-// Both the producer (upstoxService) and consumer (alertService) import from here.
+// ──────────────────────────────────────────────────────────────
+// REFACTORED: Alert processing no longer uses Bull queue.
+// Alerts are processed inline via setImmediate() in upstoxService.
+// This file is kept for backward compatibility but the queue is
+// no longer actively used for tick processing.
+// Email and Telegram queues remain as Bull queues (they benefit
+// from retry logic for external API calls).
+// ──────────────────────────────────────────────────────────────
 
 const Bull = require("bull");
 const config = require("../config/config");
@@ -11,30 +17,16 @@ const alertQueue = new Bull("alert-processing", {
     port: config.redisPort,
     password: config.redisPassword,
   },
-  limiter: { max: 2000, duration: 1000 },
   defaultJobOptions: {
     removeOnComplete: 10,
     removeOnFail: 20,
-    attempts: 1, // ticks are ephemeral — no retry needed
+    attempts: 1,
   },
 });
 
 alertQueue.on("error", (err) => {
-  // Suppress MISCONF spam
-  if (String(err.message).includes('MISCONF')) return;
-  console.error("❌ Alert queue error:", err.message);
+  if (String(err.message).includes("MISCONF")) return;
+  console.error("Alert queue error:", err.message);
 });
-
-// Aggressive cleanup — every 5 minutes
-setInterval(async () => {
-  try {
-    await alertQueue.clean(30 * 60 * 1000, "completed");  // 30 minutes
-    await alertQueue.clean(2 * 60 * 60 * 1000, "failed");  // 2 hours
-  } catch (err) {
-    if (!String(err.message).includes('MISCONF')) {
-      console.error("❌ Alert queue cleanup error:", err.message);
-    }
-  }
-}, 5 * 60 * 1000);
 
 module.exports = alertQueue;

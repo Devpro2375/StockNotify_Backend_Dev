@@ -1,35 +1,43 @@
 // services/historyService.js
+// REFACTORED: Cached token lookup to avoid N MongoDB queries per history request,
+// added metrics for cache hit/miss tracking.
 
 const axios = require("axios");
 const config = require("../config/config");
 const AccessToken = require("../models/AccessToken");
+const logger = require("../utils/logger");
+const metrics = require("../utils/metrics");
 
-// Reuse shared Redis client from redisService (no duplicate connections)
 const { redis: redisClient } = require("./redisService");
 
-// Get Date in IST
+// ── Cached access token (refreshed every 5 min) ──
+let cachedToken = null;
+let tokenCacheExpiry = 0;
+const TOKEN_CACHE_TTL = 5 * 60 * 1000;
+
+async function getToken() {
+  if (cachedToken && Date.now() < tokenCacheExpiry) return cachedToken;
+  const tokenDoc = await AccessToken.findOne().lean();
+  if (!tokenDoc?.token) throw new Error("No access token found in database");
+  cachedToken = tokenDoc.token;
+  tokenCacheExpiry = Date.now() + TOKEN_CACHE_TTL;
+  return cachedToken;
+}
+
 function nowInIST() {
   return new Date(
-    new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" })
+    new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }),
   );
 }
 
-// NSE timings in IST: 09:15 – 15:30 (Mon–Fri)
 function isNSEOpen() {
   const now = nowInIST();
   const day = now.getDay();
   if (day === 0 || day === 6) return false;
-  const hours = now.getHours();
-  const minutes = now.getMinutes();
-  const totalMinutes = hours * 60 + minutes;
-
-  const marketStart = 9 * 60 + 15;
-  const marketEnd = 15 * 60 + 30;
-
-  return totalMinutes >= marketStart && totalMinutes <= marketEnd;
+  const totalMinutes = now.getHours() * 60 + now.getMinutes();
+  return totalMinutes >= 555 && totalMinutes <= 930; // 09:15 - 15:30
 }
 
-// Map custom intervals to Upstox V3 format
 function getUpstoxIntervalParams(interval) {
   const mapping = {
     1: { unit: "minutes", interval: "1" },
@@ -46,189 +54,146 @@ function getUpstoxIntervalParams(interval) {
   return mapping[interval] || { unit: "days", interval: "1" };
 }
 
-// Fetch TODAY'S intraday candles (V3 Intraday API)
 async function fetchIntradayCandles(instrumentKey, interval, token) {
   try {
     const { unit, interval: intervalValue } = getUpstoxIntervalParams(interval);
-    if (unit === "days" || unit === "weeks" || unit === "months") {
-      return [];
-    }
+    if (unit !== "minutes") return [];
 
     const baseUrl =
       config.upstoxBaseUrl || config.upstoxRestUrl || "https://api.upstox.com";
     const encodedKey = encodeURIComponent(instrumentKey);
+    const url = `${baseUrl}/v3/historical-candle/intraday/${encodedKey}/${unit}/${intervalValue}`;
 
-    const intradayUrl = `${baseUrl}/v3/historical-candle/intraday/${encodedKey}/${unit}/${intervalValue}`;
-    const response = await axios.get(intradayUrl, {
+    const response = await axios.get(url, {
       headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
       timeout: 10000,
     });
 
     const candles = response.data?.data?.candles || [];
-    if (!candles.length) return [];
-
-    return candles.map((c) => {
-      const timestamp = c[0];
-      const isoTime =
-        typeof timestamp === "number"
-          ? new Date(timestamp * 1000).toISOString()
-          : timestamp;
-
-      return {
-        time: isoTime,
-        open: parseFloat(c[1]),
-        high: parseFloat(c[2]),
-        low: parseFloat(c[3]),
-        close: parseFloat(c[4]),
-        volume: parseInt(c[5] || 0, 10),
-      };
-    });
+    return candles.map((c) => ({
+      time:
+        typeof c[0] === "number" ? new Date(c[0] * 1000).toISOString() : c[0],
+      open: parseFloat(c[1]),
+      high: parseFloat(c[2]),
+      low: parseFloat(c[3]),
+      close: parseFloat(c[4]),
+      volume: parseInt(c[5] || 0, 10),
+    }));
   } catch (err) {
-    console.error("❌ Error fetching intraday candles:", err.message);
+    logger.error("Error fetching intraday candles", { error: err.message });
     return [];
   }
 }
 
-// Fetch HISTORICAL candles (V3 Historical API)
 async function fetchHistoricalCandles(instrumentKey, interval, token) {
-  try {
-    const baseUrl =
-      config.upstoxBaseUrl || config.upstoxRestUrl || "https://api.upstox.com";
-    const encodedKey = encodeURIComponent(instrumentKey);
-    const { unit, interval: intervalValue } = getUpstoxIntervalParams(interval);
+  const baseUrl =
+    config.upstoxBaseUrl || config.upstoxRestUrl || "https://api.upstox.com";
+  const encodedKey = encodeURIComponent(instrumentKey);
+  const { unit, interval: intervalValue } = getUpstoxIntervalParams(interval);
 
-    const today = new Date().toISOString().slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10);
+  const daysBackMap = {
+    1: 30,
+    5: 30,
+    15: 30,
+    25: 30,
+    30: 30,
+    75: 90,
+    125: 90,
+    day: 730,
+    week: 1825,
+    month: 3650,
+  };
+  const daysBack = daysBackMap[interval] || 30;
 
-    let daysBack = 30;
-    switch (interval) {
-      case "1":
-      case "5":
-      case "15":
-      case "25":
-      case "30":
-        daysBack = 30;
-        break;
-      case "75":
-      case "125":
-        daysBack = 90;
-        break;
-      case "day":
-        daysBack = 730;
-        break;
-      case "week":
-        daysBack = 1825;
-        break;
-      case "month":
-        daysBack = 3650;
-        break;
-      default:
-        break;
-    }
+  const fromDate = new Date();
+  fromDate.setDate(fromDate.getDate() - daysBack);
+  const from = fromDate.toISOString().slice(0, 10);
 
-    const fromDate = new Date();
-    fromDate.setDate(fromDate.getDate() - daysBack);
-    const from = fromDate.toISOString().slice(0, 10);
+  const url = `${baseUrl}/v3/historical-candle/${encodedKey}/${unit}/${intervalValue}/${today}/${from}`;
+  const response = await axios.get(url, {
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+    timeout: 15000,
+  });
 
-    const historicalUrl = `${baseUrl}/v3/historical-candle/${encodedKey}/${unit}/${intervalValue}/${today}/${from}`;
-
-    const response = await axios.get(historicalUrl, {
-      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-      timeout: 15000,
-    });
-
-    const candles = response.data?.data?.candles || [];
-    if (!candles.length) {
-      console.warn(
-        `⚠️ No historical candles for ${instrumentKey} (${unit}/${intervalValue})`
-      );
-      return [];
-    }
-
-    return candles.map((c) => {
-      const timestamp = c[0];
-      let timeValue;
-      if (unit === "days" || unit === "weeks" || unit === "months") {
-        timeValue =
-          typeof timestamp === "number"
-            ? new Date(timestamp * 1000).toISOString().split("T")[0]
-            : String(timestamp).split("T")[0];
-      } else {
-        timeValue =
-          typeof timestamp === "number"
-            ? new Date(timestamp * 1000).toISOString()
-            : timestamp;
-      }
-
-      return {
-        time: timeValue,
-        open: parseFloat(c[1]),
-        high: parseFloat(c[2]),
-        low: parseFloat(c[3]),
-        close: parseFloat(c[4]),
-        volume: parseInt(c[5] || 0, 10),
-      };
-    });
-  } catch (err) {
-    console.error(`❌ Error fetching historical candles:`, err.message);
-    throw err;
+  const candles = response.data?.data?.candles || [];
+  if (!candles.length) {
+    logger.warn(
+      `No historical candles for ${instrumentKey} (${unit}/${intervalValue})`,
+    );
+    return [];
   }
+
+  const isDaily = unit === "days" || unit === "weeks" || unit === "months";
+  return candles.map((c) => {
+    let timeValue;
+    if (isDaily) {
+      timeValue =
+        typeof c[0] === "number"
+          ? new Date(c[0] * 1000).toISOString().split("T")[0]
+          : String(c[0]).split("T")[0];
+    } else {
+      timeValue =
+        typeof c[0] === "number" ? new Date(c[0] * 1000).toISOString() : c[0];
+    }
+    return {
+      time: timeValue,
+      open: parseFloat(c[1]),
+      high: parseFloat(c[2]),
+      low: parseFloat(c[3]),
+      close: parseFloat(c[4]),
+      volume: parseInt(c[5] || 0, 10),
+    };
+  });
 }
 
-// Main: cache BOTH historical + intraday data
-// Uses stale-while-revalidate: serve cached instantly, refresh in background
 async function cacheHistoricalData(instrumentKey, interval) {
   const cacheKey = `history:${instrumentKey}:${interval}`;
 
   try {
-    // Check cache first
     const cached = await redisClient.get(cacheKey);
     if (cached) {
-      // Stale-while-revalidate: check TTL remaining
+      metrics.inc("history_cache_hits");
       const ttl = await redisClient.ttl(cacheKey);
       const marketOpen = isNSEOpen();
       const maxTtl = marketOpen ? 120 : 3600;
 
-      // If cache is past half-life, refresh in background (non-blocking)
       if (ttl > 0 && ttl < maxTtl / 2) {
-        refreshCacheInBackground(instrumentKey, interval, cacheKey, maxTtl);
+        refreshCacheInBackground(instrumentKey, interval, cacheKey);
       }
 
       return JSON.parse(cached);
     }
 
-    // No cache — fetch fresh
+    metrics.inc("history_cache_misses");
     return await fetchAndCache(instrumentKey, interval, cacheKey);
   } catch (err) {
-    console.error(
-      `❌ Error in cacheHistoricalData for ${instrumentKey}:`,
-      err.message
-    );
+    logger.error(`Error in cacheHistoricalData for ${instrumentKey}`, {
+      error: err.message,
+    });
     if (err.response?.status === 401) throw new Error("Access token expired");
     if (err.response?.status === 404) throw new Error("Instrument not found");
     throw err;
   }
 }
 
-// Shared fetch + cache logic
 async function fetchAndCache(instrumentKey, interval, cacheKey) {
-  const tokenDoc = await AccessToken.findOne().lean();
-  if (!tokenDoc?.token) throw new Error("No access token found in database");
-
+  const token = await getToken();
   const marketOpen = isNSEOpen();
   const { unit } = getUpstoxIntervalParams(interval);
 
   const [historicalCandles, intradayCandles] = await Promise.all([
-    fetchHistoricalCandles(instrumentKey, interval, tokenDoc.token),
+    fetchHistoricalCandles(instrumentKey, interval, token),
     marketOpen && unit === "minutes"
-      ? fetchIntradayCandles(instrumentKey, interval, tokenDoc.token)
+      ? fetchIntradayCandles(instrumentKey, interval, token)
       : Promise.resolve([]),
   ]);
 
-  // Merge + sort + de-duplicate
   let allCandles = [...historicalCandles, ...intradayCandles];
   allCandles.sort(
-    (a, b) => new Date(a.time).getTime() - new Date(b.time).getTime()
+    (a, b) => new Date(a.time).getTime() - new Date(b.time).getTime(),
   );
+
   const seen = new Set();
   allCandles = allCandles.filter((c) => {
     if (seen.has(c.time)) return false;
@@ -236,23 +201,17 @@ async function fetchAndCache(instrumentKey, interval, cacheKey) {
     return true;
   });
 
-  // Cache with TTL: 120s during market hours, 1 hour after close
   const cacheDuration = marketOpen ? 120 : 3600;
-  await redisClient.setEx(
-    cacheKey,
-    cacheDuration,
-    JSON.stringify(allCandles)
-  );
+  await redisClient.setex(cacheKey, cacheDuration, JSON.stringify(allCandles));
 
   return allCandles;
 }
 
-// Background refresh — fire-and-forget, never throws to caller
-function refreshCacheInBackground(instrumentKey, interval, cacheKey, maxTtl) {
+function refreshCacheInBackground(instrumentKey, interval, cacheKey) {
   fetchAndCache(instrumentKey, interval, cacheKey).catch((err) => {
-    console.warn(
-      `⚠️ Background cache refresh failed for ${instrumentKey}:${interval}:`,
-      err.message
+    logger.warn(
+      `Background cache refresh failed for ${instrumentKey}:${interval}`,
+      { error: err.message },
     );
   });
 }

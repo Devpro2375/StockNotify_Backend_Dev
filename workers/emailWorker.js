@@ -1,21 +1,19 @@
-const emailQueue = require('../queues/emailQueue');
-const emailService = require('../utils/email');
+const emailQueue = require("../queues/emailQueue");
+const emailService = require("../utils/email");
+const logger = require("../utils/logger");
 
-// Process email jobs from the queue
 emailQueue.process(async (job) => {
   const { userEmail, alertDetails } = job.data;
-  
-  console.log(`📬 Processing email job ${job.id} for ${userEmail} - ${alertDetails.trading_symbol}`);
-  
+  logger.info(`Processing email job ${job.id} for ${userEmail} - ${alertDetails.trading_symbol}`);
+
   try {
-    const result = await emailService.sendAlertEmailNow(userEmail, alertDetails);
-    return result; // Return success result
+    return await emailService.sendAlertEmailNow(userEmail, alertDetails);
   } catch (error) {
-    console.error(`❌ Email job ${job.id} failed:`, error.message);
-    throw error; // Bull will handle retries automatically
+    logger.error(`Email job ${job.id} failed`, { error: error.message });
+    throw error;
   }
 });
 
-console.log('✅ Email worker started and listening for jobs');
+logger.info("Email worker started");
 
 module.exports = emailQueue;

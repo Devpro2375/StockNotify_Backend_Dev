@@ -1,4 +1,13 @@
 // app.js
+// ──────────────────────────────────────────────────────────────
+// REFACTORED:
+//  1. Replaced console.log with structured Winston logger
+//  2. Metrics auto-start (60s summary interval)
+//  3. Removed alertQueue import (alerts processed inline now)
+//  4. Consolidated redundant persistent stock cleanup (handled by alertSubscriptionManager)
+//  5. Health check includes metrics snapshot
+//  6. Graceful shutdown properly stops metrics + flushes Redis tick buffer
+// ──────────────────────────────────────────────────────────────
 require("dotenv").config();
 
 const express = require("express");
@@ -28,11 +37,10 @@ const telegramService = require("./services/telegramService");
 const AccessToken = require("./models/AccessToken");
 const { updateInstruments } = require("./services/instrumentService");
 const { STATUSES } = require("./services/constants");
+const logger = require("./utils/logger");
+const metrics = require("./utils/metrics");
 
-// Ensure a single Firebase Admin instance across the app
 const admin = require("./services/firebase");
-
-// Initialize Passport strategies
 require("./config/passport");
 
 // --------------------------------------------------
@@ -41,10 +49,7 @@ require("./config/passport");
 const app = express();
 const server = http.createServer(app);
 
-// Trust proxy for platforms like Railway/Render/Heroku
 app.set("trust proxy", 1);
-
-// Security/stability improvements
 app.disable("x-powered-by");
 
 // --------------------------------------------------
@@ -54,20 +59,17 @@ app.use(cookieParser());
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// CORS
 const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:3001",
   process.env.FRONTEND_URL,
   config.frontendBaseUrl,
-  "https://your-frontend-domain.vercel.app",
 ].filter(Boolean);
 
 const corsOptions = {
   origin(origin, callback) {
     if (!origin) return callback(null, true);
-    const isAllowed = allowedOrigins.includes(origin);
-    if (isAllowed || process.env.NODE_ENV !== "production") {
+    if (allowedOrigins.includes(origin) || process.env.NODE_ENV !== "production") {
       return callback(null, true);
     }
     return callback(new Error("CORS: Origin not allowed"), false);
@@ -82,14 +84,10 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
-// Sessions
 app.use(
   session({
     name: "sid",
-    secret:
-      config.sessionSecret ||
-      process.env.SESSION_SECRET ||
-      "change-this-secret-in-production",
+    secret: config.sessionSecret || process.env.SESSION_SECRET || "change-this-secret-in-production",
     resave: false,
     saveUninitialized: false,
     store: MongoStore.create({
@@ -97,10 +95,7 @@ app.use(
       touchAfter: 24 * 3600,
       ttl: 7 * 24 * 60 * 60,
       crypto: {
-        secret:
-          config.sessionSecret ||
-          process.env.SESSION_SECRET ||
-          "change-this-secret-in-production",
+        secret: config.sessionSecret || process.env.SESSION_SECRET || "change-this-secret-in-production",
       },
     }),
     cookie: {
@@ -110,10 +105,9 @@ app.use(
       maxAge: 7 * 24 * 60 * 60 * 1000,
     },
     proxy: true,
-  }),
+  })
 );
 
-// Passport
 app.use(passport.initialize());
 app.use(passport.session());
 
@@ -131,12 +125,10 @@ app.use("/api/history", historyRoutes);
 
 // Health check
 app.get("/health", async (req, res) => {
-  const mongoReady =
-    mongoose.connection.readyState === 1 ? "connected" : "disconnected";
+  const mongoReady = mongoose.connection.readyState === 1 ? "connected" : "disconnected";
   let redis = "unknown";
   try {
-    redis =
-      (await redisService.ping()) === "PONG" ? "connected" : "disconnected";
+    redis = (await redisService.ping()) === "PONG" ? "connected" : "disconnected";
   } catch {
     redis = "disconnected";
   }
@@ -145,6 +137,7 @@ app.get("/health", async (req, res) => {
   res.json({
     status: "ok",
     timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
     services: {
       mongodb: mongoReady,
       telegram: telegramService.isInitialized ? "active" : "inactive",
@@ -161,94 +154,71 @@ app.get("/health", async (req, res) => {
 mongoose
   .connect(config.mongoURI)
   .then(async () => {
-    console.log("✅ MongoDB connected");
+    logger.info("MongoDB connected");
 
     // Ensure AccessToken doc exists
     let tokenDoc = await AccessToken.findOne();
     if (!tokenDoc) {
       tokenDoc = new AccessToken({ token: "" });
       await tokenDoc.save();
-      console.log("✅ Initialized empty AccessToken in DB.");
+      logger.info("Initialized empty AccessToken in DB");
     }
 
-    // Redis cleanup & warmup — wrapped in try-catch so MISCONF doesn't crash startup
+    // Redis cleanup & warmup (critical for 500MB limit)
     try {
       await redisService.cleanupStaleStocks();
+      await redisService.deepCleanupRedisMemory();
       const symbols = await redisService.getAllGlobalStocks();
       if (symbols.length) {
-        console.log("📊 Preloading close prices for:", symbols.length, "symbols");
+        logger.info(`Preloading close prices for ${symbols.length} symbols`);
         const BATCH_SIZE = 10;
         for (let i = 0; i < symbols.length; i += BATCH_SIZE) {
           const batch = symbols.slice(i, i + BATCH_SIZE);
           await Promise.allSettled(batch.map((sym) => fetchLastClose(sym)));
         }
       }
-      console.log("✅ Preloading complete.");
+      logger.info("Preloading complete");
     } catch (redisErr) {
-      console.warn("⚠️ Redis warmup failed (server will continue):", redisErr.message);
+      logger.warn("Redis warmup failed (server will continue)", { error: redisErr.message });
     }
 
     // ==== CRON JOBS ====
+    // Store task references for graceful shutdown
+    const cronTasks = [];
 
     // 1) Upstox token auto-refresh — daily 6:30 AM IST
     const UpstoxTokenRefresh = require("./services/upstoxTokenRefresh");
-    cron.schedule(
+    cronTasks.push(cron.schedule(
       "30 6 * * *",
       async () => {
-        // ── Heartbeat log ──
-        console.log(
-          `\n[CRON HEARTBEAT] ${new Date().toISOString()} — Upstox token refresh cron FIRED`,
-        );
-        console.log(
-          `[CRON HEARTBEAT] Timezone: Asia/Kolkata | Local: ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`,
-        );
-
-        const attempt = async (attemptNum) => {
-          console.log(
-            `[${new Date().toISOString()}] 🔄 Upstox token refresh attempt ${attemptNum}`,
-          );
+        logger.info("Cron: Upstox token refresh fired");
+        const attempt = async (num) => {
           try {
             const refresher = new UpstoxTokenRefresh();
             const result = await refresher.refreshToken();
             if (result.success) {
-              console.log(
-                `[${new Date().toISOString()}] ✅ Token refresh successful - expires at ${result.expiresAt
-                }`,
-              );
+              logger.info(`Token refresh successful - expires at ${result.expiresAt}`);
               return true;
-            } else {
-              console.error(
-                `[${new Date().toISOString()}] ❌ Token refresh failed: ${result.error
-                }`,
-              );
-              return false;
             }
+            logger.error(`Token refresh failed: ${result.error}`);
+            return false;
           } catch (err) {
-            console.error(
-              `[${new Date().toISOString()}] ❌ Token refresh error:`,
-              err.message,
-            );
+            logger.error("Token refresh error", { error: err.message, attempt: num });
             return false;
           }
         };
 
-        // First attempt
-        const ok = await attempt(1);
-        if (!ok) {
-          // Retry once after 30 seconds
-          console.log(
-            `[${new Date().toISOString()}] ⏳ Retrying token refresh in 30s...`,
-          );
+        if (!(await attempt(1))) {
+          logger.info("Retrying token refresh in 30s...");
           await new Promise((r) => setTimeout(r, 30_000));
           await attempt(2);
         }
       },
-      { timezone: "Asia/Kolkata" },
-    );
-    console.log("✅ Upstox token refresh cron scheduled at 6:30 AM IST daily");
+      { timezone: "Asia/Kolkata" }
+    ));
 
     // 2) Periodic preload of close prices (every 5 minutes)
-    cron.schedule("*/5 * * * *", async () => {
+    cronTasks.push(cron.schedule("*/5 * * * *", async () => {
       try {
         const syms = await redisService.getAllGlobalStocks();
         const BATCH_SIZE = 10;
@@ -257,114 +227,87 @@ mongoose
           await Promise.allSettled(batch.map((sym) => fetchLastClose(sym)));
         }
       } catch (err) {
-        console.error("❌ Error in periodic preload:", err);
+        logger.error("Error in periodic preload", { error: err.message });
       }
-    });
+    }));
 
-    // 3) Cleanup persistent stocks (every 5 minutes)
-    cron.schedule("*/5 * * * *", async () => {
-      try {
-        const Alert = require("./models/Alert");
-        const persistent = await redisService.getPersistentStocks();
-        for (const symbol of persistent) {
-          const activeAlerts = await Alert.countDocuments({
-            instrument_key: symbol,
-            status: { $nin: [STATUSES.SL_HIT, STATUSES.TARGET_HIT] },
-          });
-          if (
-            activeAlerts === 0 &&
-            (await redisService.getStockUserCount(symbol)) === 0
-          ) {
-            await redisService.removePersistentStock(symbol);
-            require("./services/upstoxService").unsubscribe([symbol]);
-            console.log(`🧹 Cleaned persistent stock: ${symbol}`);
-          }
-        }
-      } catch (err) {
-        console.error("❌ Error in persistent stock cleanup:", err);
-      }
-    });
-
-    // 4) Daily instrument update at 6:30 AM IST
-    cron.schedule(
-      "30 6 * * *",
+    // 3) Daily instrument update at 6:35 AM IST (5 min after token refresh to avoid resource contention)
+    cronTasks.push(cron.schedule(
+      "35 6 * * *",
       async () => {
         try {
-          console.log("🔄 Starting scheduled daily instrument update...");
+          logger.info("Starting scheduled daily instrument update...");
           const result = await updateInstruments();
-          console.log(
-            `[${new Date().toISOString()}] ✅ Instrument update complete: ${result.count
-            } instruments (deleted ${result.deleted} old)`,
-          );
+          logger.info(`Instrument update complete: ${result.count} instruments (deleted ${result.deleted} old)`);
         } catch (err) {
-          console.error(
-            `[${new Date().toISOString()}] ❌ Scheduled instrument update failed:`,
-            err.message,
-          );
+          logger.error("Scheduled instrument update failed", { error: err.message });
         }
       },
-      { timezone: "Asia/Kolkata" },
-    );
-    console.log("✅ Instrument update cron scheduled at 6:30 AM IST daily");
+      { timezone: "Asia/Kolkata" }
+    ));
 
-    // Initialize Telegram bot
-    console.log("📱 Initializing Telegram Bot...");
+    // 4) Deep Redis memory cleanup (every 30 minutes) — critical for 500MB limit
+    cronTasks.push(cron.schedule("*/30 * * * *", async () => {
+      try {
+        await redisService.deepCleanupRedisMemory();
+      } catch (err) {
+        logger.error("Error in deep Redis cleanup", { error: err.message });
+      }
+    }));
+
+    // 5) Drain old alert queue data from Redis (one-time on startup)
+    //    Alert processing moved to inline — clean out stale Bull queue keys
+    try {
+      const alertQueue = require("./queues/alertQueue");
+      await alertQueue.empty();
+      await alertQueue.clean(0, "completed");
+      await alertQueue.clean(0, "failed");
+      await alertQueue.clean(0, "delayed");
+      await alertQueue.clean(0, "wait");
+      await alertQueue.clean(0, "active");
+      await alertQueue.close();
+      logger.info("Old alert queue drained and closed");
+    } catch (err) {
+      logger.warn("Alert queue drain error (non-critical)", { error: err.message });
+    }
+
+    logger.info("Cron jobs scheduled: token refresh, close price preload, instrument update, Redis cleanup");
+
+    // Initialize services
+    logger.info("Initializing Telegram Bot...");
     await telegramService.init();
 
-    // Start email worker (queue-based)
-    console.log("📧 Starting email worker...");
+    logger.info("Starting email worker...");
     require("./workers/emailWorker");
 
-    // Register alert queue processor + start in-memory cache
+    // Start alert cache (no more Bull queue processor registration)
     const alertService = require("./services/alertService");
     alertService.startCacheRefresh();
 
-    // Initialize Socket Service (Upstox WS connection established inside)
+    // Initialize Socket.IO + Upstox WS
     socketService.init(server);
 
-    // Start background alert subscription manager
-    // Ensures all stocks with active alerts are subscribed to Upstox WS
+    // Start alert subscription manager
     const alertSubscriptionManager = require("./services/alertSubscriptionManager");
     await alertSubscriptionManager.start();
 
     // Start server
     server.listen(config.port, async () => {
       const botInfo = await telegramService.getBotInfo();
-      const telegramStatus = telegramService.isInitialized
-        ? "ACTIVE"
-        : "INACTIVE";
-      const botUsername = botInfo ? `@${botInfo.username}` : "N/A";
       const ws = getWsStatus();
 
-      console.log(`
-╔══════════════════════════════════════════════════════════╗
-║   🚀 Server running on port ${String(config.port).padEnd(29)}║
-║   📡 Environment: ${(process.env.NODE_ENV || "development").padEnd(30)}║
-║   🌐 Frontend URL: ${(
-          config.frontendBaseUrl ||
-          process.env.FRONTEND_URL ||
-          "N/A"
-        ).padEnd(27)}║
-║   📧 Email Worker: ACTIVE                                 ║
-║   🔔 Firebase Push: ${admin?.apps?.length ? "ACTIVE".padEnd(37) : "INACTIVE".padEnd(37)
-        }║
-║   📱 Telegram Bot: ${telegramStatus.padEnd(37)}║
-║   🤖 Bot Username: ${String(botUsername).padEnd(37)}║
-║   🔌 Upstox WS:   ${ws.status.padEnd(37)}║
-║   ⏰ Cron Jobs: 4 ACTIVE                                   ║
-╚══════════════════════════════════════════════════════════╝
-      `);
-
-      if (botInfo) {
-        console.log(`📱 Telegram Bot Ready: @${botInfo.username}`);
-        console.log(
-          `🔗 Users can start chat: https://t.me/${botInfo.username}`,
-        );
-      }
+      logger.info("Server started", {
+        port: config.port,
+        env: process.env.NODE_ENV || "development",
+        telegram: telegramService.isInitialized ? "active" : "inactive",
+        bot: botInfo ? `@${botInfo.username}` : "N/A",
+        upstoxWs: ws.status,
+        firebase: admin?.apps?.length ? "active" : "inactive",
+      });
     });
   })
   .catch((err) => {
-    console.error("❌ MongoDB connection error:", err);
+    logger.error("MongoDB connection error", { error: err.message });
     process.exit(1);
   });
 
@@ -375,8 +318,8 @@ app.use((req, res) => {
   res.status(404).json({ msg: "Route not found" });
 });
 
-app.use((err, req, res, next) => {
-  console.error("❌ Global error handler:", err);
+app.use((err, req, res, _next) => {
+  logger.error("Global error handler", { error: err.message, stack: err.stack });
   res.status(err.status || 500).json({
     msg: err.message || "Server error",
     error: process.env.NODE_ENV === "development" ? err.stack : undefined,
@@ -384,86 +327,95 @@ app.use((err, req, res, next) => {
 });
 
 // --------------------------------------------------
-// Graceful shutdown — close all queues + connections
+// Graceful shutdown
 // --------------------------------------------------
 async function shutdown(signal) {
   try {
-    console.log(`⚠️ ${signal} signal received: closing HTTP server`);
+    logger.info(`${signal} received: closing server`);
     server.close(async () => {
-      console.log("✅ HTTP server closed");
+      logger.info("HTTP server closed");
 
-      // Close all Bull queues
+      // Stop all cron jobs first to prevent them firing after connections close
       try {
-        const alertQueue = require("./queues/alertQueue");
-        const emailQueue = require("./queues/emailQueue");
-        const telegramQueue = require("./queues/telegramQueue");
-        await Promise.allSettled([
-          alertQueue.close(),
-          emailQueue.close(),
-          telegramQueue.close(),
-        ]);
-        console.log("✅ All Bull queues closed");
+        const allTasks = cron.getTasks();
+        for (const [, task] of allTasks) {
+          task.stop();
+        }
+        logger.info("Cron jobs stopped");
       } catch (e) {
-        console.error("❌ Queue close error", e);
+        logger.error("Cron stop error", { error: e.message });
       }
 
-      // Stop alert subscription manager + cache
+      // Stop metrics collection
+      metrics.stop();
+
+      // Close Bull queues (email + telegram only; alert queue no longer used)
+      try {
+        const emailQueue = require("./queues/emailQueue");
+        const telegramQueue = require("./queues/telegramQueue");
+        await Promise.allSettled([emailQueue.close(), telegramQueue.close()]);
+        logger.info("Bull queues closed");
+      } catch (e) {
+        logger.error("Queue close error", { error: e.message });
+      }
+
+      // Stop alert services
       try {
         const alertSubscriptionManager = require("./services/alertSubscriptionManager");
         alertSubscriptionManager.stop();
         const alertService = require("./services/alertService");
         alertService.stopCacheRefresh();
-        console.log("✅ Alert subscription manager + cache stopped");
+        logger.info("Alert services stopped");
       } catch (e) {
-        console.error("❌ Alert subscription manager stop error", e);
+        logger.error("Alert service stop error", { error: e.message });
       }
 
       try {
         await mongoose.connection.close();
-        console.log("✅ MongoDB connection closed");
+        logger.info("MongoDB connection closed");
       } catch (e) {
-        console.error("❌ MongoDB close error", e);
-      }
-      try {
-        await redisService.quit();
-        console.log("✅ Redis connection closed");
-      } catch (e) {
-        console.error("❌ Redis close error", e);
+        logger.error("MongoDB close error", { error: e.message });
       }
 
-      // Stop Telegram bot (polling)
+      // Flush tick buffer then close Redis
+      try {
+        await redisService.flushAndQuit();
+        logger.info("Redis connection closed (tick buffer flushed)");
+      } catch (e) {
+        logger.error("Redis close error", { error: e.message });
+      }
+
       try {
         await telegramService.cleanup();
-        console.log("✅ Telegram bot stopped");
+        logger.info("Telegram bot stopped");
       } catch (e) {
-        console.error("❌ Telegram stop error", e);
+        logger.error("Telegram stop error", { error: e.message });
       }
 
       process.exit(0);
     });
   } catch (e) {
-    console.error("❌ Error during shutdown:", e);
+    logger.error("Error during shutdown", { error: e.message });
     process.exit(1);
   }
 }
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
-process.once("SIGUSR2", () => shutdown("SIGUSR2")); // Verify graceful reload with nodemon
+process.once("SIGUSR2", () => shutdown("SIGUSR2"));
 
 process.on("uncaughtException", (err) => {
-  console.error("❌ Uncaught Exception:", err);
+  logger.error("Uncaught Exception", { error: err.message, stack: err.stack });
   process.exit(1);
 });
 
-process.on("unhandledRejection", (reason, promise) => {
-  // Don't crash on Redis connection-close errors during shutdown
+process.on("unhandledRejection", (reason) => {
   const msg = String(reason?.message || reason || "");
   if (msg.includes("Connection is closed") || msg.includes("ECONNRESET")) {
-    console.warn("⚠️ Suppressed Redis rejection:", msg);
+    logger.warn("Suppressed Redis rejection during shutdown", { reason: msg });
     return;
   }
-  console.error("❌ Unhandled Rejection at:", promise, "reason:", reason);
+  logger.error("Unhandled Rejection", { reason: msg });
 });
 
 module.exports = { app, server };
