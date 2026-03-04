@@ -111,57 +111,90 @@ async function fetchHistoricalCandles(instrumentKey, interval, token) {
   const from = fromDate.toISOString().slice(0, 10);
 
   const url = `${baseUrl}/v3/historical-candle/${encodedKey}/${unit}/${intervalValue}/${today}/${from}`;
-  const response = await axios.get(url, {
-    headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-    timeout: 15000,
-  });
 
-  const candles = response.data?.data?.candles || [];
-  if (!candles.length) {
-    logger.warn(
-      `No historical candles for ${instrumentKey} (${unit}/${intervalValue})`,
-    );
+  try {
+    const response = await axios.get(url, {
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      timeout: 15000,
+    });
+
+    const candles = response.data?.data?.candles || [];
+    if (!candles.length) {
+      logger.warn(
+        `No historical candles for ${instrumentKey} (${unit}/${intervalValue})`,
+      );
+      return [];
+    }
+
+    const isDaily = unit === "days" || unit === "weeks" || unit === "months";
+    return candles.map((c) => {
+      let timeValue;
+      if (isDaily) {
+        timeValue =
+          typeof c[0] === "number"
+            ? new Date(c[0] * 1000).toISOString().split("T")[0]
+            : String(c[0]).split("T")[0];
+      } else {
+        timeValue =
+          typeof c[0] === "number" ? new Date(c[0] * 1000).toISOString() : c[0];
+      }
+      return {
+        time: timeValue,
+        open: parseFloat(c[1]),
+        high: parseFloat(c[2]),
+        low: parseFloat(c[3]),
+        close: parseFloat(c[4]),
+        volume: parseInt(c[5] || 0, 10),
+      };
+    });
+  } catch (err) {
+    const status = err.response?.status;
+    const body = err.response?.data;
+    if (status === 400) {
+      // Upstox returns 400 for unsupported instrument+interval combos (e.g., minute data for indices)
+      logger.warn(`Upstox 400 for ${instrumentKey} (${unit}/${intervalValue})`, {
+        detail: body?.message || body?.error || JSON.stringify(body)?.slice(0, 200),
+      });
+      return [];
+    }
+    if (status === 401) {
+      logger.error("Access token expired in fetchHistoricalCandles");
+      throw new Error("Access token expired");
+    }
+    logger.error(`Error fetching historical candles for ${instrumentKey}`, {
+      error: err.message,
+      status,
+    });
     return [];
   }
-
-  const isDaily = unit === "days" || unit === "weeks" || unit === "months";
-  return candles.map((c) => {
-    let timeValue;
-    if (isDaily) {
-      timeValue =
-        typeof c[0] === "number"
-          ? new Date(c[0] * 1000).toISOString().split("T")[0]
-          : String(c[0]).split("T")[0];
-    } else {
-      timeValue =
-        typeof c[0] === "number" ? new Date(c[0] * 1000).toISOString() : c[0];
-    }
-    return {
-      time: timeValue,
-      open: parseFloat(c[1]),
-      high: parseFloat(c[2]),
-      low: parseFloat(c[3]),
-      close: parseFloat(c[4]),
-      volume: parseInt(c[5] || 0, 10),
-    };
-  });
 }
 
 async function cacheHistoricalData(instrumentKey, interval) {
   const cacheKey = `history:${instrumentKey}:${interval}`;
 
   try {
-    const cached = await redisClient.get(cacheKey);
+    let cached = null;
+    try {
+      cached = await redisClient.get(cacheKey);
+    } catch (cacheReadErr) {
+      // MISCONF or other Redis read failure — fall through to API fetch
+      if (!String(cacheReadErr.message).includes("MISCONF")) {
+        logger.warn(`Redis read error for ${cacheKey}`, { error: cacheReadErr.message });
+      }
+    }
+
     if (cached) {
       metrics.inc("history_cache_hits");
-      const ttl = await redisClient.ttl(cacheKey);
-      const marketOpen = isNSEOpen();
-      const maxTtl = marketOpen ? 120 : 3600;
-
-      if (ttl > 0 && ttl < maxTtl / 2) {
-        refreshCacheInBackground(instrumentKey, interval, cacheKey);
+      try {
+        const ttl = await redisClient.ttl(cacheKey);
+        const marketOpen = isNSEOpen();
+        const maxTtl = marketOpen ? 120 : 3600;
+        if (ttl > 0 && ttl < maxTtl / 2) {
+          refreshCacheInBackground(instrumentKey, interval, cacheKey);
+        }
+      } catch {
+        // TTL check failed — non-critical, continue with cached data
       }
-
       return JSON.parse(cached);
     }
 
@@ -202,7 +235,14 @@ async function fetchAndCache(instrumentKey, interval, cacheKey) {
   });
 
   const cacheDuration = marketOpen ? 120 : 3600;
-  await redisClient.setex(cacheKey, cacheDuration, JSON.stringify(allCandles));
+  try {
+    await redisClient.setex(cacheKey, cacheDuration, JSON.stringify(allCandles));
+  } catch (cacheWriteErr) {
+    // MISCONF or other Redis write failure — data is still returned to caller
+    if (!String(cacheWriteErr.message).includes("MISCONF")) {
+      logger.warn(`Redis write error for ${cacheKey}`, { error: cacheWriteErr.message });
+    }
+  }
 
   return allCandles;
 }
@@ -216,4 +256,9 @@ function refreshCacheInBackground(instrumentKey, interval, cacheKey) {
   });
 }
 
-module.exports = { cacheHistoricalData };
+function invalidateTokenCache() {
+  cachedToken = null;
+  tokenCacheExpiry = 0;
+}
+
+module.exports = { cacheHistoricalData, invalidateTokenCache };

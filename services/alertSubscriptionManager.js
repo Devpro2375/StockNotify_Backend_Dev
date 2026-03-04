@@ -57,7 +57,9 @@ async function syncAlertSubscriptions() {
       logger.info(`Alert subscriptions: -${toRemove.length} stocks`);
     }
   } catch (err) {
-    logger.error("Alert subscription sync error", { error: err.message });
+    if (!String(err.message).includes("MISCONF")) {
+      logger.error("Alert subscription sync error", { error: err.message });
+    }
   } finally {
     isSyncing = false;
   }

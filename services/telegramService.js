@@ -39,7 +39,12 @@ class TelegramService {
         config.telegramWebhookUrl.startsWith("https://");
 
       if (isProduction && hasValidWebhook) {
-        await this.setupWebhook();
+        try {
+          await this.setupWebhook();
+        } catch (webhookErr) {
+          console.warn("⚠️ Webhook setup failed, falling back to polling:", webhookErr.message);
+          await this.startPolling();
+        }
       } else {
         await this.startPolling();
       }
@@ -149,8 +154,7 @@ class TelegramService {
     const delay = Math.min(5000 * this.reconnectAttempts, 30000);
 
     console.log(
-      `🔄 Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts}/${
-        this.maxReconnectAttempts
+      `🔄 Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts
       })`
     );
 
@@ -551,6 +555,17 @@ Get instant stock alerts on Telegram.
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
       this.healthCheckInterval = null;
+    }
+
+    if (this.bot) {
+      // Remove all event listeners to prevent duplicate handlers on re-init
+      this.bot.removeAllListeners('message');
+      this.bot.removeAllListeners('callback_query');
+      this.bot.removeAllListeners('polling_error');
+      this.bot.removeAllListeners('error');
+      this.bot.removeAllListeners('webhook_error');
+      // Clear onText regex handlers
+      this.bot._textRegexpCallbacks = [];
     }
 
     if (this.pollingActive && this.bot) {

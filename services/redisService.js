@@ -24,9 +24,13 @@ const redisConfig = {
 
 const client = new Redis(redisConfig);
 
+// ── MISCONF helper — used throughout to suppress RDB-snapshot errors ──
+function isMisconf(err) {
+  return String(err?.message || "").includes("MISCONF");
+}
+
 client.on("error", (err) => {
-  // Suppress MISCONF spam
-  if (String(err.message).includes("MISCONF")) return;
+  if (isMisconf(err)) return; // suppress MISCONF spam
   logger.error("Redis Client Error", { error: err.message });
 });
 client.on("connect", () => logger.info("Redis connected"));
@@ -107,10 +111,15 @@ async function getLastTickBatch(symbols) {
 // ── Close price cache ──
 
 async function setLastClosePrice(symbol, data) {
-  const pipeline = client.pipeline();
-  pipeline.hset("stock:lastClose", symbol, JSON.stringify(data));
-  pipeline.expire("stock:lastClose", 86400);
-  await pipeline.exec();
+  try {
+    const pipeline = client.pipeline();
+    pipeline.hset("stock:lastClose", symbol, JSON.stringify(data));
+    pipeline.expire("stock:lastClose", 86400);
+    await pipeline.exec();
+  } catch (err) {
+    if (!isMisconf(err)) throw err;
+    // MISCONF — skip write, data will be fetched fresh next time
+  }
 }
 
 async function getLastClosePrice(symbol) {
@@ -334,11 +343,19 @@ async function deepCleanupRedisMemory() {
 // ── Persistent stock management ──
 
 async function addPersistentStock(symbol) {
-  await client.sadd("persistent:stocks", symbol);
+  try {
+    await client.sadd("persistent:stocks", symbol);
+  } catch (err) {
+    if (!isMisconf(err)) throw err;
+  }
 }
 
 async function removePersistentStock(symbol) {
-  await client.srem("persistent:stocks", symbol);
+  try {
+    await client.srem("persistent:stocks", symbol);
+  } catch (err) {
+    if (!isMisconf(err)) throw err;
+  }
 }
 
 async function getPersistentStocks() {

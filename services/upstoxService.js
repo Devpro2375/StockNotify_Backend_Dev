@@ -53,6 +53,12 @@ const BASE_RECONNECT_DELAY = 5000;
 // Prevents emitting identical ticks to rooms when price hasn't changed
 const lastBroadcastLtp = new Map();
 
+// ── Failed symbol cooldown cache ──
+// Tracks symbols that fail fetchLastClose repeatedly. Skips them for 30 min.
+const failedSymbolCache = new Map(); // symbol -> { count, lastFailAt }
+const FAIL_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes
+const FAIL_THRESHOLD = 3; // skip after this many consecutive failures
+
 async function getAccessTokenFromDB() {
   const tokenDoc = await AccessToken.findOne().lean();
   if (!tokenDoc || !tokenDoc.token) {
@@ -95,6 +101,15 @@ async function resubscribeAll() {
 }
 
 async function fetchLastClose(instrumentKey) {
+  // Check cooldown: skip symbols that fail repeatedly
+  const failInfo = failedSymbolCache.get(instrumentKey);
+  if (failInfo && failInfo.count >= FAIL_THRESHOLD) {
+    if (Date.now() - failInfo.lastFailAt < FAIL_COOLDOWN_MS) {
+      return null; // still in cooldown
+    }
+    failedSymbolCache.delete(instrumentKey); // cooldown expired, retry
+  }
+
   try {
     const accessToken = await getAccessTokenFromDB();
     const baseUrl = config.upstoxBaseUrl || config.upstoxRestUrl || "https://api.upstox.com";
@@ -108,7 +123,17 @@ async function fetchLastClose(instrumentKey) {
     });
 
     const candles = res.data?.data?.candles || [];
-    if (!candles.length) return null;
+    if (!candles.length) {
+      // Track failure
+      const info = failedSymbolCache.get(instrumentKey) || { count: 0, lastFailAt: 0 };
+      info.count++;
+      info.lastFailAt = Date.now();
+      failedSymbolCache.set(instrumentKey, info);
+      return null;
+    }
+
+    // Success — clear failure history
+    failedSymbolCache.delete(instrumentKey);
 
     const last = candles[candles.length - 1];
     const payload = {
@@ -123,12 +148,26 @@ async function fetchLastClose(instrumentKey) {
     await redisService.setLastClosePrice(instrumentKey, payload);
     return payload;
   } catch (err) {
-    if (err.response?.status === 404) {
-      logger.warn(`Symbol ${instrumentKey} not found or no data available`);
+    // Track failure
+    const info = failedSymbolCache.get(instrumentKey) || { count: 0, lastFailAt: 0 };
+    info.count++;
+    info.lastFailAt = Date.now();
+    failedSymbolCache.set(instrumentKey, info);
+
+    if (err.response?.status === 429) {
+      const retryAfter = err.response.headers?.['retry-after'] || 60;
+      logger.warn(`Rate limited on fetchLastClose, retry after ${retryAfter}s`);
+    } else if (err.response?.status === 404) {
+      // Only warn once, then cooldown handles suppression
+      if (info.count <= 1) {
+        logger.warn(`Symbol ${instrumentKey} not found or no data available`);
+      }
     } else if (err.response?.status === 401) {
       logger.error("Access token invalid/expired for fetchLastClose");
     } else {
-      logger.error(`Error fetching last close for ${instrumentKey}`, { error: err.message });
+      if (info.count <= 1) {
+        logger.warn(`Error fetching last close for ${instrumentKey}`, { error: err.message });
+      }
     }
     return null;
   }
@@ -230,7 +269,7 @@ async function connect() {
       const jitter = Math.random() * 2000;
       const delay = Math.min(baseDelay + jitter, 60000);
       logger.info(`Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${reconnectAttempts})`);
-      setTimeout(() => connect().catch(() => {}), delay);
+      setTimeout(() => connect().catch(() => { }), delay);
     });
 
     ws.on("error", (err) => {
@@ -243,7 +282,7 @@ async function connect() {
     reconnectAttempts++;
     const baseDelay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1);
     const jitter = Math.random() * 2000;
-    setTimeout(() => connect().catch(() => {}), Math.min(baseDelay + jitter, 60000));
+    setTimeout(() => connect().catch(() => { }), Math.min(baseDelay + jitter, 60000));
   }
 }
 
@@ -274,10 +313,28 @@ function getWsStatus() {
 const subscribe = (symbols) => sendSubscription("sub", symbols);
 const unsubscribe = (symbols) => sendSubscription("unsub", symbols);
 
+// ── Force reconnect with fresh token ──
+// Called after token refresh cron to pick up the new access token
+async function reconnect() {
+  logger.info("Reconnecting Upstox WS with new token...");
+  reconnectAttempts = 0;
+  connecting = false;
+  if (ws && ws.readyState !== WebSocket.CLOSED) {
+    try {
+      ws.close(1000, "Token refreshed — reconnecting");
+    } catch {
+      // ignore
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  await connect();
+}
+
 module.exports = {
   subscribe,
   unsubscribe,
   fetchLastClose,
   connect,
   getWsStatus,
+  reconnect,
 };

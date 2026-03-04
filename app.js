@@ -31,7 +31,7 @@ const telegramRoutes = require("./routes/telegramRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 const historyRoutes = require("./routes/historyRoutes");
 
-const { fetchLastClose, getWsStatus } = require("./services/upstoxService");
+const { fetchLastClose, getWsStatus, reconnect: reconnectUpstoxWs } = require("./services/upstoxService");
 const redisService = require("./services/redisService");
 const telegramService = require("./services/telegramService");
 const AccessToken = require("./models/AccessToken");
@@ -39,6 +39,7 @@ const { updateInstruments } = require("./services/instrumentService");
 const { STATUSES } = require("./services/constants");
 const logger = require("./utils/logger");
 const metrics = require("./utils/metrics");
+const { invalidateTokenCache: invalidateHistoryTokenCache } = require("./services/historyService");
 
 const admin = require("./services/firebase");
 require("./config/passport");
@@ -198,6 +199,15 @@ mongoose
             const result = await refresher.refreshToken();
             if (result.success) {
               logger.info(`Token refresh successful - expires at ${result.expiresAt}`);
+              // Invalidate cached token in history service
+              invalidateHistoryTokenCache();
+              // Reconnect Upstox WS with new token
+              try {
+                await reconnectUpstoxWs();
+                logger.info("Upstox WS reconnected after token refresh");
+              } catch (wsErr) {
+                logger.error("Upstox WS reconnect failed after token refresh", { error: wsErr.message });
+              }
               return true;
             }
             logger.error(`Token refresh failed: ${result.error}`);
