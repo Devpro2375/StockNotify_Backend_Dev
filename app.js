@@ -256,9 +256,10 @@ mongoose
       { timezone: "Asia/Kolkata" }
     ));
 
-    // 4) Deep Redis memory cleanup (every 30 minutes) — critical for 500MB limit
-    cronTasks.push(cron.schedule("*/30 * * * *", async () => {
+    // 4) Redis stale-stock + memory cleanup (every 10 minutes) — critical for 500MB limit
+    cronTasks.push(cron.schedule("*/10 * * * *", async () => {
       try {
+        await redisService.cleanupStaleStocks();
         await redisService.deepCleanupRedisMemory();
       } catch (err) {
         logger.error("Error in deep Redis cleanup", { error: err.message });
