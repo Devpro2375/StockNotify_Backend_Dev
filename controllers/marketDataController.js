@@ -4,6 +4,7 @@
 const axios = require("axios");
 const redisService = require("../services/redisService");
 const AccessToken = require("../models/AccessToken");
+const config = require("../config/config");
 const logger = require("../utils/logger");
 
 /**
@@ -84,11 +85,13 @@ exports.getQuotes = async (req, res) => {
           continue;
         }
 
-        const url = `https://api.upstox.com/v2/market-quote/quotes?instrument_key=${encodeURIComponent(instrument)}`;
+        const baseUrl = config.upstoxRestUrl || "https://api.upstox.com";
+        const url = `${baseUrl}/v2/market-quote/quotes?instrument_key=${encodeURIComponent(instrument)}`;
         const response = await axios.get(url, {
           headers: {
             Authorization: `Bearer ${accessToken}`,
             Accept: "application/json",
+            "Api-Version": "2.0",
           },
           timeout: 5000,
         });
