@@ -5,7 +5,48 @@ const axios = require("axios");
 const redisService = require("../services/redisService");
 const AccessToken = require("../models/AccessToken");
 const config = require("../config/config");
+const upstoxService = require("../services/upstoxService");
 const logger = require("../utils/logger");
+
+function buildFallbackOhlc(price, closePrice = price) {
+  return {
+    open: closePrice,
+    high: price,
+    low: price,
+    close: price,
+  };
+}
+
+function parseV3LtpQuote(response, instrument) {
+  const data = response?.data?.data?.[instrument];
+  if (data?.last_price == null) {
+    return null;
+  }
+
+  const price = Number(data.last_price);
+  const closePrice = Number(data.cp ?? data.last_price);
+
+  return {
+    last_price: price,
+    ohlc: buildFallbackOhlc(price, closePrice),
+    source: "upstox_ltp_v3",
+  };
+}
+
+function parseV2FullQuote(response, instrument) {
+  const data = response?.data?.data?.[instrument];
+  if (data?.last_price == null) {
+    return null;
+  }
+
+  const price = Number(data.last_price);
+
+  return {
+    last_price: price,
+    ohlc: data.ohlc || buildFallbackOhlc(price),
+    source: "upstox_quote_v2",
+  };
+}
 
 /**
  * GET /api/market-data/quotes
@@ -86,28 +127,68 @@ exports.getQuotes = async (req, res) => {
         }
 
         const baseUrl = config.upstoxRestUrl || "https://api.upstox.com";
-        const url = `${baseUrl}/v2/market-quote/quotes?instrument_key=${encodeURIComponent(instrument)}`;
-        const response = await axios.get(url, {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            Accept: "application/json",
-            "Api-Version": "2.0",
+        const quoteAttempts = [
+          {
+            label: "v3_ltp",
+            url: `${baseUrl}/v3/market-quote/ltp?instrument_key=${encodeURIComponent(instrument)}`,
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              Accept: "application/json",
+            },
+            parse: parseV3LtpQuote,
           },
-          timeout: 5000,
-        });
+          {
+            label: "v2_full_quote",
+            url: `${baseUrl}/v2/market-quote/quotes?instrument_key=${encodeURIComponent(instrument)}`,
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              Accept: "application/json",
+              "Api-Version": "2.0",
+            },
+            parse: parseV2FullQuote,
+          },
+        ];
 
-        if (response.data?.data?.[instrument]) {
-          const data = response.data.data[instrument];
-          quotes[instrument] = {
-            last_price: data.last_price,
-            ohlc: data.ohlc,
-            source: "upstox_api",
-          };
-        } else {
-          quotes[instrument] = null;
+        let resolvedQuote = null;
+
+        for (const attempt of quoteAttempts) {
+          try {
+            const response = await axios.get(attempt.url, {
+              headers: attempt.headers,
+              timeout: 5000,
+            });
+            resolvedQuote = attempt.parse(response, instrument);
+            if (resolvedQuote) {
+              break;
+            }
+          } catch (attemptError) {
+            logger.warn(`Quote fallback ${attempt.label} failed for ${instrument}`, {
+              status: attemptError.response?.status,
+              error: attemptError.message,
+            });
+          }
         }
+
+        if (!resolvedQuote) {
+          const lastClose = await upstoxService.fetchLastClose(instrument);
+          if (lastClose?.close != null) {
+            resolvedQuote = {
+              last_price: Number(lastClose.close),
+              ohlc: {
+                open: Number(lastClose.open ?? lastClose.close),
+                high: Number(lastClose.high ?? lastClose.close),
+                low: Number(lastClose.low ?? lastClose.close),
+                close: Number(lastClose.close),
+              },
+              source: "historical_fallback",
+            };
+          }
+        }
+
+        quotes[instrument] = resolvedQuote;
       } catch (error) {
         logger.warn(`Failed to fetch quote for ${instrument}`, {
+          status: error.response?.status,
           error: error.message,
         });
         quotes[instrument] = null;
