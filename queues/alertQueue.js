@@ -9,14 +9,10 @@
 // ──────────────────────────────────────────────────────────────
 
 const Bull = require("bull");
-const config = require("../config/config");
+const redisConfig = require("../config/redisConfig");
 
 const alertQueue = new Bull("alert-processing", {
-  redis: {
-    host: config.redisHost,
-    port: config.redisPort,
-    password: config.redisPassword,
-  },
+  redis: redisConfig,
   defaultJobOptions: {
     removeOnComplete: 10,
     removeOnFail: 20,

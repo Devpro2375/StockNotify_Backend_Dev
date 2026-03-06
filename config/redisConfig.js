@@ -4,10 +4,20 @@
 
 const config = require("./config");
 
-module.exports = {
+const redisConfig = {
   host: config.redisHost,
   port: config.redisPort,
   password: config.redisPassword,
   maxRetriesPerRequest: null,
   enableReadyCheck: false,
 };
+
+if (config.redisUsername) {
+  redisConfig.username = config.redisUsername;
+}
+
+if (config.redisTls) {
+  redisConfig.tls = { rejectUnauthorized: false };
+}
+
+module.exports = redisConfig;

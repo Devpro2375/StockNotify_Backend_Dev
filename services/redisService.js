@@ -10,17 +10,9 @@
 // ──────────────────────────────────────────────────────────────
 
 const Redis = require("ioredis");
-const config = require("../config/config");
+const redisConfig = require("../config/redisConfig");
 const logger = require("../utils/logger");
 const metrics = require("../utils/metrics");
-
-const redisConfig = {
-  host: config.redisHost,
-  port: config.redisPort,
-  password: config.redisPassword,
-  maxRetriesPerRequest: null, // required by Bull
-  enableReadyCheck: false,
-};
 
 const client = new Redis(redisConfig);
 

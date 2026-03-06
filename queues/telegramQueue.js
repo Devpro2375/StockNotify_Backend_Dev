@@ -3,16 +3,12 @@
 // removed verbose waiting/error logging, cleaned up redundant error handler.
 
 const Bull = require("bull");
-const config = require("../config/config");
+const redisConfig = require("../config/redisConfig");
 const telegramService = require("../services/telegramService");
 const logger = require("../utils/logger");
 
 const telegramQueue = new Bull("telegram-notifications", {
-  redis: {
-    host: config.redisHost,
-    port: config.redisPort,
-    password: config.redisPassword,
-  },
+  redis: redisConfig,
   defaultJobOptions: {
     attempts: 3,
     backoff: { type: "exponential", delay: 2000 },

@@ -65,11 +65,20 @@ exports.getQuotes = async (req, res) => {
     if (!instrumentList.length)
       return res.status(400).json({ error: "No instruments provided" });
 
-    // Batch fetch ticks + close prices in two Redis round-trips
-    const [ticks, closePrices] = await Promise.all([
-      redisService.getLastTickBatch(instrumentList),
-      redisService.getLastClosePriceBatch(instrumentList),
-    ]);
+    let ticks = {};
+    let closePrices = {};
+
+    // Redis should help, but quote lookup must still work without it.
+    try {
+      [ticks, closePrices] = await Promise.all([
+        redisService.getLastTickBatch(instrumentList),
+        redisService.getLastClosePriceBatch(instrumentList),
+      ]);
+    } catch (redisError) {
+      logger.warn("Redis quote cache unavailable, using API fallbacks", {
+        error: redisError.message,
+      });
+    }
 
     // Lazy-load token only if needed for API fallback
     let accessToken = null;

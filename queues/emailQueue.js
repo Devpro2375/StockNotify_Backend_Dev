@@ -2,15 +2,11 @@
 // REFACTORED: Replaced console.log with logger, added .unref() to cleanup interval.
 
 const Bull = require("bull");
-const config = require("../config/config");
+const redisConfig = require("../config/redisConfig");
 const logger = require("../utils/logger");
 
 const emailQueue = new Bull("email-notifications", {
-  redis: {
-    host: config.redisHost,
-    port: config.redisPort,
-    password: config.redisPassword,
-  },
+  redis: redisConfig,
   limiter: { max: 5, duration: 1000 },
   defaultJobOptions: {
     attempts: 3,
