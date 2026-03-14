@@ -7,10 +7,12 @@ const config = require("../config/config");
 const crypto = require("crypto");
 const { sendVerificationEmail } = require("../utils/email");
 const { validationResult } = require("express-validator");
+const logger = require("../utils/logger");
 
 // In‑memory cache for /me payload
 const userCache = new Map();
 const CACHE_TTL = 300000; // 5 minutes
+const MAX_USER_CACHE = 5000;
 
 const generateToken = (userId, rememberMe = false) => {
   const payload = { user: { id: userId } };
@@ -41,15 +43,15 @@ exports.register = async (req, res) => {
 
     const verifyUrl = `${config.frontendBaseUrl}/verify-email?token=${user.verificationToken}`;
     sendVerificationEmail(user.email, verifyUrl).catch((err) =>
-      console.error("Email send error:", err)
+      logger.error("Email send error", { error: err.message })
     );
 
     res.json({
       msg: "Registration successful. Please check your email to verify.",
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Server error");
+    logger.error("Register error", { error: err.message });
+    res.status(500).json({ msg: "Server error" });
   }
 };
 
@@ -92,6 +94,10 @@ exports.login = async (req, res) => {
       pushAlerts: user.pushAlerts ?? true,
       smsAlerts: user.smsAlerts ?? false,
     };
+    if (userCache.size >= MAX_USER_CACHE) {
+      const oldest = userCache.keys().next().value;
+      userCache.delete(oldest);
+    }
     userCache.set(user.id, {
       user: userWithPrefs,
       expiresAt: Date.now() + CACHE_TTL,
@@ -103,8 +109,8 @@ exports.login = async (req, res) => {
       user: userWithPrefs,
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Server error");
+    logger.error("Login error", { error: err.message });
+    res.status(500).json({ msg: "Server error" });
   }
 };
 
@@ -152,7 +158,7 @@ exports.verifyEmail = async (req, res) => {
       },
     });
   } catch (err) {
-    console.error("❌ Email verification error:", err);
+    logger.error("Email verification error", { error: err.message });
     res.status(500).json({
       msg: "Server error during verification",
       error: process.env.NODE_ENV === "development" ? err.message : undefined,
@@ -189,7 +195,7 @@ exports.resendVerification = async (req, res) => {
         success: true,
       });
     } catch (emailError) {
-      console.error("❌ EMAIL SENDING ERROR:", emailError);
+      logger.error("Email sending error", { error: emailError.message, code: emailError.code });
       if (emailError.code === "EAUTH") {
         return res.status(500).json({
           msg: "Email authentication failed. Please contact support.",
@@ -217,7 +223,7 @@ exports.resendVerification = async (req, res) => {
       });
     }
   } catch (err) {
-    console.error("❌ RESEND VERIFICATION SERVER ERROR:", err);
+    logger.error("Resend verification error", { error: err.message });
     return res.status(500).json({
       msg: "Server error. Please try again.",
       error: process.env.NODE_ENV === "development" ? err.message : undefined,
@@ -262,8 +268,8 @@ exports.getMe = async (req, res) => {
     });
     res.json({ user: withDefaults });
   } catch (err) {
-    console.error("Error in /me:", err);
-    res.status(500).send("Server error");
+    logger.error("Error in /me", { error: err.message });
+    res.status(500).json({ msg: "Server error" });
   }
 };
 
@@ -313,7 +319,7 @@ exports.updateProfile = async (req, res) => {
       },
     });
   } catch (err) {
-    console.error(err);
+    logger.error("Auth error", { error: err.message });
     res.status(500).json({ msg: "Server error" });
   }
 };
@@ -352,7 +358,7 @@ exports.changePassword = async (req, res) => {
     clearUserCache(req.user.id);
     res.json({ msg: "Password updated successfully" });
   } catch (err) {
-    console.error(err);
+    logger.error("Auth error", { error: err.message });
     res.status(500).json({ msg: "Server error" });
   }
 };
@@ -368,8 +374,8 @@ exports.updateDeviceToken = async (req, res) => {
     await User.findByIdAndUpdate(req.user.id, { deviceToken });
     res.json({ msg: "Device token updated successfully" });
   } catch (err) {
-    console.error("Error updating device token:", err);
-    res.status(500).send("Server error");
+    logger.error("Error updating device token", { error: err.message });
+    res.status(500).json({ msg: "Server error" });
   }
 };
 
@@ -378,8 +384,8 @@ exports.logout = async (req, res) => {
     clearUserCache(req.user.id);
     res.json({ msg: "Logged out successfully" });
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Server error");
+    logger.error("Logout error", { error: err.message });
+    res.status(500).json({ msg: "Server error" });
   }
 };
 

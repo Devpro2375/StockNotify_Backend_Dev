@@ -20,8 +20,10 @@ const MongoStore = require("connect-mongo");
 const cron = require("node-cron");
 const passport = require("passport");
 
+const helmet = require("helmet");
 const config = require("./config/config");
 const socketService = require("./services/socketService");
+const { apiLimiter } = require("./middlewares/rateLimiter");
 const authRoutes = require("./routes/authRoutes");
 const watchlistRoutes = require("./routes/watchlistRoutes");
 const marketDataRoutes = require("./routes/marketDataRoutes");
@@ -54,11 +56,29 @@ app.set("trust proxy", 1);
 app.disable("x-powered-by");
 
 // --------------------------------------------------
-// Middleware
+// Security & Middleware
 // --------------------------------------------------
+app.use(helmet({ contentSecurityPolicy: false })); // CSP handled by frontend/reverse proxy
 app.use(cookieParser());
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
+
+// Request logging middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on("finish", () => {
+    const duration = Date.now() - start;
+    if (req.path !== "/health") {
+      logger.info("request", {
+        method: req.method,
+        url: req.originalUrl,
+        status: res.statusCode,
+        ms: duration,
+      });
+    }
+  });
+  next();
+});
 
 const allowedOrigins = [
   "http://localhost:3000",
@@ -115,6 +135,7 @@ app.use(passport.session());
 // --------------------------------------------------
 // Routes
 // --------------------------------------------------
+app.use("/api", apiLimiter); // General rate limit on all /api routes
 app.use("/admin", adminRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/watchlist", watchlistRoutes);
@@ -135,6 +156,20 @@ app.get("/health", async (req, res) => {
   }
   const ws = getWsStatus();
 
+  // Bull queue stats
+  let queues = {};
+  try {
+    const emailQueue = require("./queues/emailQueue");
+    const telegramQueue = require("./queues/telegramQueue");
+    const [emailCounts, telegramCounts] = await Promise.all([
+      emailQueue.getJobCounts(),
+      telegramQueue.getJobCounts(),
+    ]);
+    queues = { email: emailCounts, telegram: telegramCounts };
+  } catch {
+    queues = { error: "unavailable" };
+  }
+
   res.json({
     status: "ok",
     timestamp: new Date().toISOString(),
@@ -146,6 +181,7 @@ app.get("/health", async (req, res) => {
       upstoxWs: ws.status,
       push: admin?.apps?.length ? "active" : "inactive",
     },
+    queues,
   });
 });
 
@@ -266,22 +302,6 @@ mongoose
       }
     }));
 
-    // 5) Drain old alert queue data from Redis (one-time on startup)
-    //    Alert processing moved to inline — clean out stale Bull queue keys
-    try {
-      const alertQueue = require("./queues/alertQueue");
-      await alertQueue.empty();
-      await alertQueue.clean(0, "completed");
-      await alertQueue.clean(0, "failed");
-      await alertQueue.clean(0, "delayed");
-      await alertQueue.clean(0, "wait");
-      await alertQueue.clean(0, "active");
-      await alertQueue.close();
-      logger.info("Old alert queue drained and closed");
-    } catch (err) {
-      logger.warn("Alert queue drain error (non-critical)", { error: err.message });
-    }
-
     logger.info("Cron jobs scheduled: token refresh, close price preload, instrument update, Redis cleanup");
 
     // Initialize services
@@ -341,6 +361,13 @@ app.use((err, req, res, _next) => {
 // Graceful shutdown
 // --------------------------------------------------
 async function shutdown(signal) {
+  // Force exit after 10s if graceful shutdown hangs
+  const forceTimer = setTimeout(() => {
+    logger.error("Forced exit after 10s shutdown timeout");
+    process.exit(1);
+  }, 10_000);
+  forceTimer.unref();
+
   try {
     logger.info(`${signal} received: closing server`);
     server.close(async () => {

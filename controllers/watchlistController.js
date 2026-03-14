@@ -49,7 +49,7 @@ exports.getAllWatchlists = async (req, res) => {
     res.json({ watchlists });
   } catch (err) {
     logger.error("Error in getAllWatchlists", { error: err.message });
-    res.status(500).send("Server error");
+    res.status(500).json({ message: "Server error" });
   }
 };
 
@@ -67,7 +67,7 @@ exports.getWatchlist = async (req, res) => {
     res.json({ symbols: wl.symbols, prices: closePrices });
   } catch (err) {
     logger.error("Error in getWatchlist", { error: err.message });
-    res.status(500).send("Server error");
+    res.status(500).json({ message: "Server error" });
   }
 };
 
@@ -82,7 +82,7 @@ exports.getDefaultWatchlist = async (req, res) => {
     res.json({ symbols: wl.symbols, prices: closePrices });
   } catch (err) {
     logger.error("Error in getDefaultWatchlist", { error: err.message });
-    res.status(500).send("Server error");
+    res.status(500).json({ message: "Server error" });
   }
 };
 
@@ -109,7 +109,7 @@ exports.createWatchlist = async (req, res) => {
   } catch (err) {
     if (err.code === 11000) return res.status(400).json({ error: "Name already exists" });
     logger.error("Error in createWatchlist", { error: err.message });
-    res.status(500).send("Server error");
+    res.status(500).json({ message: "Server error" });
   }
 };
 
@@ -130,7 +130,7 @@ exports.renameWatchlist = async (req, res) => {
   } catch (err) {
     if (err.code === 11000) return res.status(400).json({ error: "Name already exists" });
     logger.error("Error in renameWatchlist", { error: err.message });
-    res.status(500).send("Server error");
+    res.status(500).json({ message: "Server error" });
   }
 };
 
@@ -156,7 +156,7 @@ exports.deleteWatchlist = async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     logger.error("Error in deleteWatchlist", { error: err.message });
-    res.status(500).send("Server error");
+    res.status(500).json({ message: "Server error" });
   }
 };
 
@@ -166,7 +166,7 @@ exports.deleteWatchlist = async (req, res) => {
 exports.addSymbolToWatchlist = async (req, res) => {
   const { instrument_key, name: trading_symbol } = req.body;
   if (!instrument_key || !trading_symbol)
-    return res.status(400).send("instrument_key and trading_symbol required");
+    return res.status(400).json({ message: "instrument_key and trading_symbol required" });
 
   try {
     const wl = await Watchlist.findOne({ _id: req.params.id, user: req.user.id });
@@ -184,7 +184,7 @@ exports.addSymbolToWatchlist = async (req, res) => {
     res.json(wl.symbols);
   } catch (err) {
     logger.error("Error in addSymbolToWatchlist", { error: err.message });
-    res.status(500).send("Server error");
+    res.status(500).json({ message: "Server error" });
   }
 };
 
@@ -193,7 +193,7 @@ exports.addSymbolToWatchlist = async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════
 exports.removeSymbolFromWatchlist = async (req, res) => {
   const { instrument_key } = req.body;
-  if (!instrument_key) return res.status(400).send("instrument_key required");
+  if (!instrument_key) return res.status(400).json({ message: "instrument_key required" });
 
   try {
     const wl = await Watchlist.findOne({ _id: req.params.id, user: req.user.id });
@@ -211,7 +211,7 @@ exports.removeSymbolFromWatchlist = async (req, res) => {
     res.json(wl.symbols);
   } catch (err) {
     logger.error("Error in removeSymbolFromWatchlist", { error: err.message });
-    res.status(500).send("Server error");
+    res.status(500).json({ message: "Server error" });
   }
 };
 
@@ -221,7 +221,7 @@ exports.removeSymbolFromWatchlist = async (req, res) => {
 exports.addSymbol = async (req, res) => {
   const { instrument_key, name: trading_symbol } = req.body;
   if (!instrument_key || !trading_symbol)
-    return res.status(400).send("instrument_key and trading_symbol required");
+    return res.status(400).json({ message: "instrument_key and trading_symbol required" });
 
   try {
     const wl = await getDefaultWatchlist(req.user.id);
@@ -237,13 +237,13 @@ exports.addSymbol = async (req, res) => {
     res.json(wl.symbols);
   } catch (err) {
     logger.error("Error in addSymbol", { error: err.message });
-    res.status(500).send("Server error");
+    res.status(500).json({ message: "Server error" });
   }
 };
 
 exports.removeSymbol = async (req, res) => {
   const { instrument_key } = req.body;
-  if (!instrument_key) return res.status(400).send("instrument_key required");
+  if (!instrument_key) return res.status(400).json({ message: "instrument_key required" });
 
   try {
     const wl = await getDefaultWatchlist(req.user.id);
@@ -259,7 +259,7 @@ exports.removeSymbol = async (req, res) => {
     res.json(wl.symbols);
   } catch (err) {
     logger.error("Error in removeSymbol", { error: err.message });
-    res.status(500).send("Server error");
+    res.status(500).json({ message: "Server error" });
   }
 };
 

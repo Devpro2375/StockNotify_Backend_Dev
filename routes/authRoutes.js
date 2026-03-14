@@ -8,10 +8,12 @@ const passport = require("passport");
 const router = express.Router();
 const authController = require("../controllers/authController");
 const authMiddleware = require("../middlewares/authMiddleware");
+const { authLimiter, verificationLimiter } = require("../middlewares/rateLimiter");
 
 // Register
 router.post(
   "/register",
+  authLimiter,
   [
     check("username", "Username is required").not().isEmpty(),
     check("email", "Please include a valid email").isEmail(),
@@ -23,6 +25,7 @@ router.post(
 // Login (with remember me)
 router.post(
   "/login",
+  authLimiter,
   [
     check("email", "Please include a valid email").isEmail(),
     check("password", "Password is required").exists(),
@@ -31,7 +34,7 @@ router.post(
 );
 
 // Email verification
-router.post("/resend-verification", authController.resendVerification);
+router.post("/resend-verification", verificationLimiter, authController.resendVerification);
 router.get("/verify/:token", authController.verifyEmail);
 
 // Protected

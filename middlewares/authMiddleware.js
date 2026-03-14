@@ -4,6 +4,7 @@ const config = require('../config/config');
 // Token cache to reduce JWT verification overhead
 const tokenCache = new Map();
 const CACHE_TTL = 60000; // 1 minute
+const MAX_TOKEN_CACHE = 10000;
 
 module.exports = (req, res, next) => {
   const token = req.header('Authorization')?.replace('Bearer ', '');
@@ -24,6 +25,12 @@ module.exports = (req, res, next) => {
     const decoded = jwt.verify(token, config.jwtSecret);
     req.user = decoded.user;
     
+    // Evict oldest entry if cache is full
+    if (tokenCache.size >= MAX_TOKEN_CACHE) {
+      const oldest = tokenCache.keys().next().value;
+      tokenCache.delete(oldest);
+    }
+
     // Cache the decoded token
     tokenCache.set(token, {
       user: decoded.user,
