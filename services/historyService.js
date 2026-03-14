@@ -93,10 +93,10 @@ async function fetchHistoricalCandles(instrumentKey, interval, token) {
 
   const today = new Date().toISOString().slice(0, 10);
   const daysBackMap = {
-    1: 30,
-    5: 30,
-    15: 30,
-    25: 30,
+    1: 5,
+    5: 10,
+    15: 20,
+    25: 25,
     30: 30,
     75: 90,
     125: 90,
