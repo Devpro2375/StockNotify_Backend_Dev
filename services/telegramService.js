@@ -84,8 +84,10 @@ class TelegramService {
 
   async startPolling() {
     try {
+      // Stop any existing polling first to avoid 409 conflict
+      try { await this.bot.stopPolling(); } catch {}
       await this.bot.deleteWebHook();
-      await this.sleep(500);
+      await this.sleep(1000);
 
       await this.bot.startPolling({
         restart: true,
@@ -106,16 +108,21 @@ class TelegramService {
     if (!this.bot) return;
 
     this.bot.on("polling_error", async (error) => {
-      console.error("❌ Telegram polling error:", error.code, error.message);
-
+      // Suppress 409 spam — only log once then stop polling to let the other instance run
       if (error.code === "ETELEGRAM" && error.response?.statusCode === 409) {
-        console.error(
-          "⚠️ CONFLICT: Another bot instance detected. Attempting to recover..."
-        );
+        if (!this._conflict409Logged) {
+          console.error("⚠️ Telegram 409: Another bot instance running. Stopping polling.");
+          this._conflict409Logged = true;
+        }
+        try { await this.bot.stopPolling(); } catch {}
         this.pollingActive = false;
-        await this.scheduleReconnect();
         return;
       }
+
+      // Suppress EFATAL spam during restart
+      if (error.code === "EFATAL") return;
+
+      console.error("❌ Telegram polling error:", error.code, error.message);
 
       if (
         error.code === "ETIMEDOUT" ||

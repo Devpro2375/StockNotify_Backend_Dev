@@ -39,16 +39,18 @@ function isNSEOpen() {
 }
 
 function getUpstoxIntervalParams(interval) {
+  // Upstox standard timeframes: 1, 5, 15, 30, 60, 120 minutes + day/week/month
+  // App uses 75 for 1H and 125 for 2H — map to Upstox's 60 and 120
   const mapping = {
-    1: { unit: "minutes", interval: "1" },
-    5: { unit: "minutes", interval: "5" },
-    15: { unit: "minutes", interval: "15" },
-    25: { unit: "minutes", interval: "25" },
-    30: { unit: "minutes", interval: "30" },
-    75: { unit: "minutes", interval: "75" },
-    125: { unit: "minutes", interval: "125" },
-    day: { unit: "days", interval: "1" },
-    week: { unit: "weeks", interval: "1" },
+    1:   { unit: "minutes", interval: "1" },
+    5:   { unit: "minutes", interval: "5" },
+    15:  { unit: "minutes", interval: "15" },
+    25:  { unit: "minutes", interval: "30" },   // no 25min on Upstox, use 30
+    30:  { unit: "minutes", interval: "30" },
+    75:  { unit: "minutes", interval: "60" },   // 1H = 60min on Upstox
+    125: { unit: "minutes", interval: "120" },  // 2H = 120min on Upstox
+    day:   { unit: "days",   interval: "1" },
+    week:  { unit: "weeks",  interval: "1" },
     month: { unit: "months", interval: "1" },
   };
   return mapping[interval] || { unit: "days", interval: "1" };
@@ -92,81 +94,88 @@ async function fetchHistoricalCandles(instrumentKey, interval, token) {
   const { unit, interval: intervalValue } = getUpstoxIntervalParams(interval);
 
   const today = new Date().toISOString().slice(0, 10);
-  const daysBackMap = {
-    1: 5,
-    5: 10,
-    15: 20,
-    25: 25,
-    30: 30,
-    75: 90,
-    125: 90,
-    day: 730,
-    week: 1825,
-    month: 3650,
-  };
+
+  // INDEX instruments (NSE_INDEX, BSE_INDEX) have stricter date limits on Upstox
+  const isIndex = instrumentKey.includes("INDEX");
+
+  const daysBackMap = isIndex
+    ? {
+        // INDEX limits — much tighter
+        1: 30, 5: 30, 15: 30, 25: 30, 30: 30,
+        75: 30, 125: 30,
+        day: 365, week: 1825, month: 3650,
+      }
+    : {
+        // EQUITY limits — normal
+        1: 30, 5: 30, 15: 30, 25: 30, 30: 365,
+        75: 365, 125: 365,
+        day: 730, week: 1825, month: 3650,
+      };
   const daysBack = daysBackMap[interval] || 30;
 
-  const fromDate = new Date();
-  fromDate.setDate(fromDate.getDate() - daysBack);
-  const from = fromDate.toISOString().slice(0, 10);
+  // Try with calculated date range. If Upstox returns 400 (Invalid date range),
+  // retry with progressively smaller ranges.
+  const retryDays = [daysBack, Math.floor(daysBack / 2), Math.floor(daysBack / 4), 7];
+  const isDaily = unit === "days" || unit === "weeks" || unit === "months";
 
-  const url = `${baseUrl}/v3/historical-candle/${encodedKey}/${unit}/${intervalValue}/${today}/${from}`;
+  for (const tryDays of retryDays) {
+    if (tryDays < 1) continue;
 
-  try {
-    const response = await axios.get(url, {
-      headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
-      timeout: 15000,
-    });
+    const tryFrom = new Date();
+    tryFrom.setDate(tryFrom.getDate() - tryDays);
+    const tryFromStr = tryFrom.toISOString().slice(0, 10);
+    const url = `${baseUrl}/v3/historical-candle/${encodedKey}/${unit}/${intervalValue}/${today}/${tryFromStr}`;
 
-    const candles = response.data?.data?.candles || [];
-    if (!candles.length) {
-      logger.warn(
-        `No historical candles for ${instrumentKey} (${unit}/${intervalValue})`,
-      );
-      return [];
-    }
+    try {
+      const response = await axios.get(url, {
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+        timeout: 15000,
+      });
 
-    const isDaily = unit === "days" || unit === "weeks" || unit === "months";
-    return candles.map((c) => {
-      let timeValue;
-      if (isDaily) {
-        timeValue =
-          typeof c[0] === "number"
-            ? new Date(c[0] * 1000).toISOString().split("T")[0]
-            : String(c[0]).split("T")[0];
-      } else {
-        timeValue =
-          typeof c[0] === "number" ? new Date(c[0] * 1000).toISOString() : c[0];
+      const candles = response.data?.data?.candles || [];
+      if (!candles.length) continue;
+
+      return candles.map((c) => {
+        let timeValue;
+        if (isDaily) {
+          timeValue =
+            typeof c[0] === "number"
+              ? new Date(c[0] * 1000).toISOString().split("T")[0]
+              : String(c[0]).split("T")[0];
+        } else {
+          timeValue =
+            typeof c[0] === "number" ? new Date(c[0] * 1000).toISOString() : c[0];
+        }
+        return {
+          time: timeValue,
+          open: parseFloat(c[1]),
+          high: parseFloat(c[2]),
+          low: parseFloat(c[3]),
+          close: parseFloat(c[4]),
+          volume: parseInt(c[5] || 0, 10),
+        };
+      });
+    } catch (err) {
+      const status = err.response?.status;
+      if (status === 400) {
+        // Invalid date range — try smaller range
+        logger.warn(`Upstox 400 for ${instrumentKey} (${unit}/${intervalValue}) with ${tryDays}d, retrying smaller...`);
+        continue;
       }
-      return {
-        time: timeValue,
-        open: parseFloat(c[1]),
-        high: parseFloat(c[2]),
-        low: parseFloat(c[3]),
-        close: parseFloat(c[4]),
-        volume: parseInt(c[5] || 0, 10),
-      };
-    });
-  } catch (err) {
-    const status = err.response?.status;
-    const body = err.response?.data;
-    if (status === 400) {
-      // Upstox returns 400 for unsupported instrument+interval combos (e.g., minute data for indices)
-      logger.warn(`Upstox 400 for ${instrumentKey} (${unit}/${intervalValue})`, {
-        detail: body?.message || body?.error || JSON.stringify(body)?.slice(0, 200),
+      if (status === 401) {
+        logger.error("Access token expired in fetchHistoricalCandles");
+        throw new Error("Access token expired");
+      }
+      logger.error(`Error fetching historical candles for ${instrumentKey}`, {
+        error: err.message,
+        status,
       });
       return [];
     }
-    if (status === 401) {
-      logger.error("Access token expired in fetchHistoricalCandles");
-      throw new Error("Access token expired");
-    }
-    logger.error(`Error fetching historical candles for ${instrumentKey}`, {
-      error: err.message,
-      status,
-    });
-    return [];
   }
+
+  logger.warn(`All date ranges exhausted for ${instrumentKey} (${unit}/${intervalValue})`);
+  return [];
 }
 
 async function cacheHistoricalData(instrumentKey, interval) {
