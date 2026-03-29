@@ -57,6 +57,7 @@ function getStateFns(position) {
 // IN-MEMORY ALERT CACHE
 // ══════════════════════════════════════════════════════════
 const alertCache = new Map();     // instrument_key -> CachedAlert[]
+const alertIdIndex = new Map();   // alertId string -> { key, idx } for O(1) lookup
 const CACHE_REFRESH_MS = 30_000;  // 30 seconds
 let cacheRefreshTimer = null;
 let cacheReady = false;
@@ -70,7 +71,7 @@ async function refreshAlertCache() {
   try {
     const alerts = await Alert.find({
       status: { $nin: [STATUSES.SL_HIT, STATUSES.TARGET_HIT] },
-    }).populate("user").lean();
+    }).populate("user", "email deviceToken telegramChatId telegramEnabled _id").lean();
 
     const newCache = new Map();
     for (const alert of alerts) {
@@ -82,8 +83,13 @@ async function refreshAlertCache() {
 
     // Atomic swap
     alertCache.clear();
+    alertIdIndex.clear();
     for (const [key, value] of newCache) {
       alertCache.set(key, value);
+      // Build O(1) alertId -> location index
+      for (let i = 0; i < value.length; i++) {
+        alertIdIndex.set(value[i]._id.toString(), { key, idx: i });
+      }
     }
 
     metrics.observe("alert_cache_refresh_ms", Date.now() - start);
@@ -116,16 +122,36 @@ function stopCacheRefresh() {
 
 function updateCacheEntry(alertId, updates) {
   const alertIdStr = alertId.toString();
-  for (const [, alerts] of alertCache) {
+  const loc = alertIdIndex.get(alertIdStr);
+  if (!loc) return;
+
+  const alerts = alertCache.get(loc.key);
+  if (!alerts || loc.idx >= alerts.length) return;
+
+  const alert = alerts[loc.idx];
+  // Verify identity (index may be stale after splices)
+  if (alert._id.toString() !== alertIdStr) {
+    // Fallback: linear scan if index is stale (rare, only after terminal removals)
     for (let i = 0; i < alerts.length; i++) {
       if (alerts[i]._id.toString() === alertIdStr) {
         Object.assign(alerts[i], updates);
         if (updates.status === STATUSES.SL_HIT || updates.status === STATUSES.TARGET_HIT) {
           alerts.splice(i, 1);
+          alertIdIndex.delete(alertIdStr);
         }
         return;
       }
     }
+    alertIdIndex.delete(alertIdStr);
+    return;
+  }
+
+  Object.assign(alert, updates);
+  if (updates.status === STATUSES.SL_HIT || updates.status === STATUSES.TARGET_HIT) {
+    alerts.splice(loc.idx, 1);
+    alertIdIndex.delete(alertIdStr);
+    // Note: indices for other alerts in this array become stale after splice,
+    // but they self-correct via the identity check above or on next cache refresh
   }
 }
 
@@ -162,6 +188,12 @@ async function processTickAlerts(symbol, ltpNum) {
   const start = Date.now();
   const bulkOps = [];
   const io = ioInstance.getIo();
+  // Batch socket emissions per user to reduce IO overhead
+  const userStatusUpdates = new Map(); // userId -> updates[]
+  const userTriggers = new Map();      // userId -> triggers[]
+
+  // Pre-resolve state functions once per position type seen in this batch
+  const fnCache = new Map();
 
   for (let i = 0; i < alerts.length; i++) {
     const alert = alerts[i];
@@ -173,7 +205,11 @@ async function processTickAlerts(symbol, ltpNum) {
     let entryCrossed = Boolean(alert.entry_crossed);
 
     // ───────────────── STATE MACHINE ─────────────────
-    const fn = getStateFns(alert.position);
+    let fn = fnCache.get(alert.position);
+    if (!fn) {
+      fn = getStateFns(alert.position);
+      fnCache.set(alert.position, fn);
+    }
     let newStatus;
 
     if (fn.slHit(alert, ltpNum)) {
@@ -197,27 +233,42 @@ async function processTickAlerts(symbol, ltpNum) {
       newStatus = STATUSES.PENDING;
     }
 
-    // Skip if nothing changed
-    if (newStatus === oldStatus && alert.last_ltp === ltpNum && entryCrossed === alert.entry_crossed) {
+    const statusChanged = newStatus !== oldStatus;
+    const entryCrossedChanged = entryCrossed !== alert.entry_crossed;
+
+    // Skip if nothing changed (status, entry_crossed, and ltp are all the same)
+    if (!statusChanged && !entryCrossedChanged && alert.last_ltp === ltpNum) {
       continue;
     }
 
-    // Update in-memory cache immediately
+    // Update in-memory cache immediately (always keep last_ltp current in memory)
     updateCacheEntry(alert._id, {
       status: newStatus,
       last_ltp: ltpNum,
       entry_crossed: entryCrossed,
     });
 
+    // Only write last_ltp to DB when status actually changes; skip the write
+    // entirely if only ltp moved and nothing meaningful changed.
+    if (!statusChanged && !entryCrossedChanged) {
+      // Only last_ltp changed — skip DB write to avoid write amplification
+      continue;
+    }
+
+    // Build $set payload: always include status and entry_crossed when they changed;
+    // include last_ltp only when there is a real status transition.
+    const $setPayload = { status: newStatus, entry_crossed: entryCrossed };
+    if (statusChanged) {
+      $setPayload.last_ltp = ltpNum;
+    }
+
     // Collect bulk DB update
     bulkOps.push({
       updateOne: {
         filter: { _id: alert._id },
-        update: { $set: { status: newStatus, last_ltp: ltpNum, entry_crossed: entryCrossed } },
+        update: { $set: $setPayload },
       },
     });
-
-    const statusChanged = newStatus !== oldStatus;
 
     if (statusChanged) {
       logger.info(`Alert transition: ${alert.trading_symbol} ${oldStatus} -> ${newStatus} at ${ltpNum}`);
@@ -264,12 +315,13 @@ async function processTickAlerts(symbol, ltpNum) {
       metrics.inc("alerts_notified");
     }
 
-    // ───────────────── SOCKET.IO LIVE UPDATE ─────────────────
+    // ───────────────── COLLECT SOCKET.IO UPDATES (batched per user) ─────────────────
     if (io) {
       const userId = (user._id || user.id || "").toString();
       const ts = new Date().toISOString();
 
-      io.to(`user:${userId}`).emit("alert_status_updated", {
+      if (!userStatusUpdates.has(userId)) userStatusUpdates.set(userId, []);
+      userStatusUpdates.get(userId).push({
         alertId: alert._id,
         status: newStatus,
         symbol,
@@ -281,7 +333,8 @@ async function processTickAlerts(symbol, ltpNum) {
       });
 
       if (TERMINAL_STATUSES.has(newStatus) && statusChanged) {
-        io.to(`user:${userId}`).emit("alert_triggered", {
+        if (!userTriggers.has(userId)) userTriggers.set(userId, []);
+        userTriggers.get(userId).push({
           alertId: alert._id,
           symbol,
           trading_symbol: alert.trading_symbol,
@@ -292,6 +345,22 @@ async function processTickAlerts(symbol, ltpNum) {
           entry_crossed: entryCrossed,
           timestamp: ts,
         });
+      }
+    }
+  }
+
+  // ───────────────── EMIT BATCHED SOCKET UPDATES ─────────────────
+  if (io) {
+    for (const [userId, updates] of userStatusUpdates) {
+      if (updates.length === 1) {
+        io.to(`user:${userId}`).emit("alert_status_updated", updates[0]);
+      } else {
+        io.to(`user:${userId}`).emit("alert_status_batch", updates);
+      }
+    }
+    for (const [userId, triggers] of userTriggers) {
+      for (const trigger of triggers) {
+        io.to(`user:${userId}`).emit("alert_triggered", trigger);
       }
     }
   }
@@ -382,7 +451,7 @@ async function sendFirebasePush(user, alert, newStatus, ltpNum, entryCrossed, sy
 async function migrateAlerts() {
   const invalidStatus = await Alert.find({
     status: { $nin: Object.values(STATUSES) },
-  });
+  }).lean();
   if (invalidStatus.length) {
     await Alert.bulkWrite(
       invalidStatus.map((alert) => ({
@@ -397,7 +466,7 @@ async function migrateAlerts() {
   const enteredAlerts = await Alert.find({
     status: { $in: [STATUSES.ENTER, STATUSES.RUNNING, STATUSES.TARGET_HIT] },
     entry_crossed: { $ne: true },
-  });
+  }).lean();
   if (enteredAlerts.length) {
     await Alert.updateMany(
       { _id: { $in: enteredAlerts.map((a) => a._id) } },
@@ -407,7 +476,7 @@ async function migrateAlerts() {
 
   const alertsWithoutField = await Alert.find({
     entry_crossed: { $exists: false },
-  });
+  }).lean();
   if (alertsWithoutField.length) {
     await Alert.bulkWrite(
       alertsWithoutField.map((alert) => ({

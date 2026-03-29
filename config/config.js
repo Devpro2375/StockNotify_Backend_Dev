@@ -59,3 +59,18 @@ module.exports = {
   adminPassword: process.env.ADMIN_PASSWORD,
   firebaseServiceAccount: process.env.FIREBASE_SERVICE_ACCOUNT
 };
+
+// --------------------------------------------------
+// Required environment variable validation
+// --------------------------------------------------
+const REQUIRED_ENV_VARS = ["MONGO_URI", "JWT_SECRET"];
+const missingVars = REQUIRED_ENV_VARS.filter((v) => !process.env[v]);
+if (missingVars.length > 0) {
+  console.error(
+    `[config] FATAL: Missing required environment variable(s): ${missingVars.join(", ")}. ` +
+      "Server cannot start without these values.",
+  );
+  throw new Error(
+    `Missing required environment variables: ${missingVars.join(", ")}`,
+  );
+}

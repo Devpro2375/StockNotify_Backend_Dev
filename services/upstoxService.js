@@ -52,6 +52,13 @@ const BASE_RECONNECT_DELAY = 5000;
 // ── LTP dedup for Socket.IO broadcast ──
 // Prevents emitting identical ticks to rooms when price hasn't changed
 const lastBroadcastLtp = new Map();
+const MAX_LTP_CACHE = 3000;
+
+// ── Alert batching state at module scope ──
+// Declared here (not inside connect()) so they survive reconnects without
+// accumulating stale closures across multiple connect() invocations.
+let alertBatch = [];
+let alertFlushScheduled = false;
 
 // ── Failed symbol cooldown cache ──
 // Tracks symbols that fail fetchLastClose repeatedly. Skips them for 30 min.
@@ -213,54 +220,90 @@ async function connect() {
       if (io) io.emit("ws-reconnected");
     });
 
+    // ── Liveness monitor: force-reconnect if no message received for 60s ──
+    let lastMessageAt = Date.now();
+    const livenessTimer = setInterval(() => {
+      if (Date.now() - lastMessageAt > 60000) {
+        logger.warn("Upstox WS silent for 60s — forcing reconnect");
+        try { ws.terminate(); } catch (e) { /* ignore */ }
+      }
+    }, 30000);
+    livenessTimer.unref();
+
     // ── HOT PATH — optimized for minimum latency ──
+    // Batch alerts: collect (symbol,ltp) pairs and process via single setImmediate
+    // alertBatch / alertFlushScheduled live at module scope (see top of file)
+
+    function flushAlertBatch() {
+      alertFlushScheduled = false;
+      const batch = alertBatch;
+      alertBatch = [];
+      const alertSvc = getAlertService();
+      for (let i = 0; i < batch.length; i++) {
+        alertSvc.processTickAlerts(batch[i][0], batch[i][1]).catch((err) =>
+          logger.error("Alert processing error", { symbol: batch[i][0], error: err.message })
+        );
+      }
+    }
+
     ws.on("message", (buffer) => {
       try {
         if (!buffer) return;
+        // Update liveness timestamp on every incoming message
+        lastMessageAt = Date.now();
+
         const decoded = FeedResponse.decode(buffer);
         const feeds = decoded?.feeds;
         if (!feeds) return;
 
         const io = ioInstance.getIo();
-        const symbols = Object.keys(feeds);
-        if (!symbols.length) return;
 
-        metrics.inc("ws_ticks_received", symbols.length);
-
-        for (let i = 0; i < symbols.length; i++) {
-          const symbol = symbols[i];
+        // Fix 5: for...in avoids Object.keys() array allocation on the hot path
+        let symbolCount = 0;
+        for (const symbol in feeds) {
+          symbolCount++;
           const tick = feeds[symbol];
 
-          // Extract LTP once
-          const ltp = extractLtp(tick);
-          const ltpNum = typeof ltp === "number" ? ltp : Number(ltp);
+          // Extract LTP once — inline for speed on hot path
+          const mFF = tick?.fullFeed?.marketFF;
+          const iFF = tick?.fullFeed?.indexFF;
+          const rawLtp = mFF?.ltpc?.ltp ?? iFF?.ltpc?.ltp;
+          const ltpNum = typeof rawLtp === "number" ? rawLtp : Number(rawLtp);
 
           // 1) Buffer tick for Redis (synchronous, non-blocking)
           redisService.setLastTick(symbol, tick);
 
           // 2) Dedup before Socket.IO broadcast — skip if LTP unchanged
+          //    Use volatile.emit: ticks are ephemeral; dropping one is acceptable
           if (io && ltpNum && lastBroadcastLtp.get(symbol) !== ltpNum) {
+            // Fix 6: evict oldest entry when the Map reaches capacity
+            if (lastBroadcastLtp.size >= MAX_LTP_CACHE) {
+              const firstKey = lastBroadcastLtp.keys().next().value;
+              lastBroadcastLtp.delete(firstKey);
+            }
             lastBroadcastLtp.set(symbol, ltpNum);
-            // Emit full tick object for clients that need OHLC data
-            io.in(symbol).emit("tick", { symbol, tick });
+            io.in(symbol).volatile.emit("tick", { symbol, tick });
           }
 
-          // 3) Process alerts directly via setImmediate (non-blocking)
-          //    This replaces the Bull queue path entirely.
+          // 3) Batch alert processing: collect all ticks, flush once per event-loop turn
           if (ltpNum && !Number.isNaN(ltpNum)) {
-            setImmediate(() => {
-              getAlertService().processTickAlerts(symbol, ltpNum).catch((err) =>
-                logger.error("Alert processing error", { symbol, error: err.message })
-              );
-            });
+            alertBatch.push([symbol, ltpNum]);
+            if (!alertFlushScheduled) {
+              alertFlushScheduled = true;
+              setImmediate(flushAlertBatch);
+            }
           }
         }
+        if (!symbolCount) return;
+
+        metrics.inc("ws_ticks_received", symbolCount);
       } catch (decodeErr) {
         logger.error("Failed to decode WS message", { error: decodeErr.message });
       }
     });
 
     ws.on("close", (code, reason) => {
+      clearInterval(livenessTimer);
       logger.warn(`WS closed: Code ${code}, Reason: ${reason}`);
       connecting = false;
       reconnectAttempts++;

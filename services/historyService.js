@@ -15,6 +15,15 @@ let cachedToken = null;
 let tokenCacheExpiry = 0;
 const TOKEN_CACHE_TTL = 5 * 60 * 1000;
 
+// ── In-memory L1 cache for hot history data (avoids Redis round-trip) ──
+const memoryCache = new Map();  // key -> { data, expiry }
+const MEM_CACHE_MARKET_TTL = 30_000;  // 30s during market hours
+const MEM_CACHE_CLOSED_TTL = 5 * 60_000;  // 5 min when closed
+const MAX_MEM_CACHE = 100;
+
+// ── Request deduplication: prevent duplicate in-flight fetches ──
+const inflightRequests = new Map();  // cacheKey -> Promise
+
 async function getToken() {
   if (cachedToken && Date.now() < tokenCacheExpiry) return cachedToken;
   const tokenDoc = await AccessToken.findOne().lean();
@@ -182,33 +191,26 @@ async function cacheHistoricalData(instrumentKey, interval) {
   const cacheKey = `history:${instrumentKey}:${interval}`;
 
   try {
-    let cached = null;
+    // ── L0: In-memory cache (zero latency) ──
+    const mem = memoryCache.get(cacheKey);
+    if (mem && Date.now() < mem.expiry) {
+      metrics.inc("history_mem_cache_hits");
+      return mem.data;
+    }
+
+    // ── Deduplicate: if an identical request is in-flight, wait for it ──
+    if (inflightRequests.has(cacheKey)) {
+      metrics.inc("history_dedup_hits");
+      return await inflightRequests.get(cacheKey);
+    }
+
+    const promise = _fetchFromCacheOrAPI(instrumentKey, interval, cacheKey);
+    inflightRequests.set(cacheKey, promise);
     try {
-      cached = await redisClient.get(cacheKey);
-    } catch (cacheReadErr) {
-      // MISCONF or other Redis read failure — fall through to API fetch
-      if (!String(cacheReadErr.message).includes("MISCONF")) {
-        logger.warn(`Redis read error for ${cacheKey}`, { error: cacheReadErr.message });
-      }
+      return await promise;
+    } finally {
+      inflightRequests.delete(cacheKey);
     }
-
-    if (cached) {
-      metrics.inc("history_cache_hits");
-      try {
-        const ttl = await redisClient.ttl(cacheKey);
-        const marketOpen = isNSEOpen();
-        const maxTtl = marketOpen ? 120 : 3600;
-        if (ttl > 0 && ttl < maxTtl / 2) {
-          refreshCacheInBackground(instrumentKey, interval, cacheKey);
-        }
-      } catch {
-        // TTL check failed — non-critical, continue with cached data
-      }
-      return JSON.parse(cached);
-    }
-
-    metrics.inc("history_cache_misses");
-    return await fetchAndCache(instrumentKey, interval, cacheKey);
   } catch (err) {
     logger.error(`Error in cacheHistoricalData for ${instrumentKey}`, {
       error: err.message,
@@ -216,6 +218,67 @@ async function cacheHistoricalData(instrumentKey, interval) {
     if (err.response?.status === 401) throw new Error("Access token expired");
     if (err.response?.status === 404) throw new Error("Instrument not found");
     throw err;
+  }
+}
+
+async function _fetchFromCacheOrAPI(instrumentKey, interval, cacheKey) {
+  // ── L1: Redis cache ──
+  let cached = null;
+  try {
+    cached = await redisClient.get(cacheKey);
+  } catch (cacheReadErr) {
+    if (!String(cacheReadErr.message).includes("MISCONF")) {
+      logger.warn(`Redis read error for ${cacheKey}`, { error: cacheReadErr.message });
+    }
+  }
+
+  if (cached) {
+    metrics.inc("history_cache_hits");
+    const parsed = JSON.parse(cached);
+    // Promote to L0
+    const marketOpen = isNSEOpen();
+    const memTtl = marketOpen ? MEM_CACHE_MARKET_TTL : MEM_CACHE_CLOSED_TTL;
+    memoryCache.set(cacheKey, { data: parsed, expiry: Date.now() + memTtl });
+    _boundMemoryCache();
+
+    try {
+      const ttl = await redisClient.ttl(cacheKey);
+      const maxTtl = marketOpen ? 120 : 3600;
+      if (ttl > 0 && ttl < maxTtl / 2) {
+        refreshCacheInBackground(instrumentKey, interval, cacheKey);
+      }
+    } catch {
+      // TTL check failed — non-critical
+    }
+    return parsed;
+  }
+
+  // ── L2: API fetch ──
+  metrics.inc("history_cache_misses");
+  const data = await fetchAndCache(instrumentKey, interval, cacheKey);
+
+  // Promote to L0
+  const marketOpen = isNSEOpen();
+  const memTtl = marketOpen ? MEM_CACHE_MARKET_TTL : MEM_CACHE_CLOSED_TTL;
+  memoryCache.set(cacheKey, { data, expiry: Date.now() + memTtl });
+  _boundMemoryCache();
+
+  return data;
+}
+
+function _boundMemoryCache() {
+  if (memoryCache.size > MAX_MEM_CACHE) {
+    const now = Date.now();
+    for (const [k, v] of memoryCache) {
+      if (v.expiry < now) memoryCache.delete(k);
+    }
+    // If still too large, drop oldest half
+    if (memoryCache.size > MAX_MEM_CACHE) {
+      const keys = [...memoryCache.keys()];
+      for (let i = 0; i < keys.length / 2; i++) {
+        memoryCache.delete(keys[i]);
+      }
+    }
   }
 }
 

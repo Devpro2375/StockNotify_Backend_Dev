@@ -21,6 +21,7 @@ const cron = require("node-cron");
 const passport = require("passport");
 
 const helmet = require("helmet");
+const compression = require("compression");
 const config = require("./config/config");
 const socketService = require("./services/socketService");
 const { apiLimiter } = require("./middlewares/rateLimiter");
@@ -33,7 +34,11 @@ const telegramRoutes = require("./routes/telegramRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 const historyRoutes = require("./routes/historyRoutes");
 
-const { fetchLastClose, getWsStatus, reconnect: reconnectUpstoxWs } = require("./services/upstoxService");
+const {
+  fetchLastClose,
+  getWsStatus,
+  reconnect: reconnectUpstoxWs,
+} = require("./services/upstoxService");
 const redisService = require("./services/redisService");
 const telegramService = require("./services/telegramService");
 const AccessToken = require("./models/AccessToken");
@@ -41,7 +46,16 @@ const { updateInstruments } = require("./services/instrumentService");
 const { STATUSES } = require("./services/constants");
 const logger = require("./utils/logger");
 const metrics = require("./utils/metrics");
-const { invalidateTokenCache: invalidateHistoryTokenCache } = require("./services/historyService");
+metrics.startMemoryTracking();
+metrics.startEventLoopLagTracking();
+const {
+  invalidateTokenCache: invalidateHistoryTokenCache,
+} = require("./services/historyService");
+
+const { getIo } = require("./services/ioInstance");
+const emailQueue = require("./queues/emailQueue");
+const telegramQueue = require("./queues/telegramQueue");
+const UpstoxTokenRefresh = require("./services/upstoxTokenRefresh");
 
 const admin = require("./services/firebase");
 require("./config/passport");
@@ -54,14 +68,33 @@ const server = http.createServer(app);
 
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
+app.set("etag", "weak"); // Enable weak ETags for automatic 304 responses
 
 // --------------------------------------------------
-// Security & Middleware
+// Security & Middleware (order matters: helmet -> compression -> body parsing)
 // --------------------------------------------------
 app.use(helmet({ contentSecurityPolicy: false })); // CSP handled by frontend/reverse proxy
+app.use(
+  compression({
+    threshold: 512, // Compress responses > 512 bytes (JSON API payloads benefit)
+    level: 6, // Balance between compression ratio and CPU cost
+    filter: (req, res) => {
+      // Skip compression for SSE / event-stream (breaks streaming)
+      if (req.headers.accept === "text/event-stream") return false;
+      return compression.filter(req, res);
+    },
+  }),
+);
 app.use(cookieParser());
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
+
+// Request correlation ID middleware — must run before request logger
+app.use((req, res, next) => {
+  req.id = req.headers["x-request-id"] || require("crypto").randomUUID();
+  res.set("x-request-id", req.id);
+  next();
+});
 
 // Request logging middleware
 app.use((req, res, next) => {
@@ -70,6 +103,7 @@ app.use((req, res, next) => {
     const duration = Date.now() - start;
     if (req.path !== "/health") {
       logger.info("request", {
+        requestId: req.id,
         method: req.method,
         url: req.originalUrl,
         status: res.statusCode,
@@ -80,17 +114,20 @@ app.use((req, res, next) => {
   next();
 });
 
-const allowedOrigins = [
-  "http://localhost:3000",
-  "http://localhost:3001",
-  process.env.FRONTEND_URL,
-  config.frontendBaseUrl,
-].filter(Boolean);
+const allowedOriginsSet = new Set(
+  [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    process.env.FRONTEND_URL,
+    config.frontendBaseUrl,
+  ].filter(Boolean),
+);
+const isNonProd = process.env.NODE_ENV !== "production";
 
 const corsOptions = {
   origin(origin, callback) {
     if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin) || process.env.NODE_ENV !== "production") {
+    if (allowedOriginsSet.has(origin) || isNonProd) {
       return callback(null, true);
     }
     return callback(new Error("CORS: Origin not allowed"), false);
@@ -99,58 +136,21 @@ const corsOptions = {
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
   allowedHeaders: ["Content-Type", "Authorization", "Cookie"],
   exposedHeaders: ["set-cookie"],
-  optionsSuccessStatus: 200,
+  maxAge: 86400, // cache preflight for 24h to reduce OPTIONS round-trips
+  optionsSuccessStatus: 204,
 };
 
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
-app.use(
-  session({
-    name: "sid",
-    secret: config.sessionSecret || process.env.SESSION_SECRET || "change-this-secret-in-production",
-    resave: false,
-    saveUninitialized: false,
-    store: MongoStore.create({
-      mongoUrl: config.mongoURI,
-      touchAfter: 24 * 3600,
-      ttl: 7 * 24 * 60 * 60,
-      crypto: {
-        secret: config.sessionSecret || process.env.SESSION_SECRET || "change-this-secret-in-production",
-      },
-    }),
-    cookie: {
-      secure: process.env.NODE_ENV === "production",
-      httpOnly: true,
-      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    },
-    proxy: true,
-  })
-);
-
-app.use(passport.initialize());
-app.use(passport.session());
-
-// --------------------------------------------------
-// Routes
-// --------------------------------------------------
-app.use("/api", apiLimiter); // General rate limit on all /api routes
-app.use("/admin", adminRoutes);
-app.use("/api/auth", authRoutes);
-app.use("/api/watchlist", watchlistRoutes);
-app.use("/api/market-data", marketDataRoutes);
-app.use("/api/alerts", alertsRoutes);
-app.use("/api/telegram", telegramRoutes);
-app.use("/api/token", tokenRoutes);
-app.use("/api/history", historyRoutes);
-
-// Health check
+// Health check — placed BEFORE session/passport to avoid unnecessary DB lookups
 app.get("/health", async (req, res) => {
-  const mongoReady = mongoose.connection.readyState === 1 ? "connected" : "disconnected";
+  const mongoReady =
+    mongoose.connection.readyState === 1 ? "connected" : "disconnected";
   let redis = "unknown";
   try {
-    redis = (await redisService.ping()) === "PONG" ? "connected" : "disconnected";
+    redis =
+      (await redisService.ping()) === "PONG" ? "connected" : "disconnected";
   } catch {
     redis = "disconnected";
   }
@@ -159,8 +159,6 @@ app.get("/health", async (req, res) => {
   // Bull queue stats
   let queues = {};
   try {
-    const emailQueue = require("./queues/emailQueue");
-    const telegramQueue = require("./queues/telegramQueue");
     const [emailCounts, telegramCounts] = await Promise.all([
       emailQueue.getJobCounts(),
       telegramQueue.getJobCounts(),
@@ -185,6 +183,52 @@ app.get("/health", async (req, res) => {
   });
 });
 
+app.use(
+  session({
+    name: "sid",
+    secret:
+      config.sessionSecret ||
+      process.env.SESSION_SECRET ||
+      "change-this-secret-in-production",
+    resave: false,
+    saveUninitialized: false,
+    store: MongoStore.create({
+      mongoUrl: config.mongoURI,
+      touchAfter: 24 * 3600,
+      ttl: 7 * 24 * 60 * 60,
+      crypto: {
+        secret:
+          config.sessionSecret ||
+          process.env.SESSION_SECRET ||
+          "change-this-secret-in-production",
+      },
+    }),
+    cookie: {
+      secure: process.env.NODE_ENV === "production",
+      httpOnly: true,
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    },
+    proxy: true,
+  }),
+);
+
+app.use(passport.initialize());
+app.use(passport.session());
+
+// --------------------------------------------------
+// Routes
+// --------------------------------------------------
+app.use("/api", apiLimiter); // General rate limit on all /api routes
+app.use("/admin", adminRoutes);
+app.use("/api/auth", authRoutes);
+app.use("/api/watchlist", watchlistRoutes);
+app.use("/api/market-data", marketDataRoutes);
+app.use("/api/alerts", alertsRoutes);
+app.use("/api/telegram", telegramRoutes);
+app.use("/api/token", tokenRoutes);
+app.use("/api/history", historyRoutes);
+
 // --------------------------------------------------
 // Database connection & startup
 // --------------------------------------------------
@@ -194,7 +238,7 @@ mongoose
     logger.info("MongoDB connected");
 
     // Ensure AccessToken doc exists
-    let tokenDoc = await AccessToken.findOne();
+    let tokenDoc = await AccessToken.findOne().lean();
     if (!tokenDoc) {
       tokenDoc = new AccessToken({ token: "" });
       await tokenDoc.save();
@@ -216,55 +260,63 @@ mongoose
       }
       logger.info("Preloading complete");
     } catch (redisErr) {
-      logger.warn("Redis warmup failed (server will continue)", { error: redisErr.message });
+      logger.warn("Redis warmup failed (server will continue)", {
+        error: redisErr.message,
+      });
     }
 
     // ==== CRON JOBS ====
-    // Store task references for graceful shutdown
-    const cronTasks = [];
+    // Shutdown uses cron.getTasks() directly — no manual task array needed.
 
     // 1) Upstox token auto-refresh — daily 6:30 AM IST
-    const UpstoxTokenRefresh = require("./services/upstoxTokenRefresh");
-    cronTasks.push(cron.schedule(
+    cron.schedule(
       "30 6 * * *",
       async () => {
-        logger.info("Cron: Upstox token refresh fired");
-        const attempt = async (num) => {
-          try {
-            const refresher = new UpstoxTokenRefresh();
-            const result = await refresher.refreshToken();
-            if (result.success) {
-              logger.info(`Token refresh successful - expires at ${result.expiresAt}`);
-              // Invalidate cached token in history service
-              invalidateHistoryTokenCache();
-              // Reconnect Upstox WS with new token
-              try {
-                await reconnectUpstoxWs();
-                logger.info("Upstox WS reconnected after token refresh");
-              } catch (wsErr) {
-                logger.error("Upstox WS reconnect failed after token refresh", { error: wsErr.message });
+          logger.info("Cron: Upstox token refresh fired");
+          const attempt = async (num) => {
+            try {
+              const refresher = new UpstoxTokenRefresh();
+              const result = await refresher.refreshToken();
+              if (result.success) {
+                logger.info(
+                  `Token refresh successful - expires at ${result.expiresAt}`,
+                );
+                // Invalidate cached token in history service
+                invalidateHistoryTokenCache();
+                // Reconnect Upstox WS with new token
+                try {
+                  await reconnectUpstoxWs();
+                  logger.info("Upstox WS reconnected after token refresh");
+                } catch (wsErr) {
+                  logger.error(
+                    "Upstox WS reconnect failed after token refresh",
+                    { error: wsErr.message },
+                  );
+                }
+                return true;
               }
-              return true;
+              logger.error(`Token refresh failed: ${result.error}`);
+              return false;
+            } catch (err) {
+              logger.error("Token refresh error", {
+                error: err.message,
+                attempt: num,
+              });
+              return false;
             }
-            logger.error(`Token refresh failed: ${result.error}`);
-            return false;
-          } catch (err) {
-            logger.error("Token refresh error", { error: err.message, attempt: num });
-            return false;
-          }
-        };
+          };
 
-        if (!(await attempt(1))) {
-          logger.info("Retrying token refresh in 30s...");
-          await new Promise((r) => setTimeout(r, 30_000));
-          await attempt(2);
-        }
-      },
-      { timezone: "Asia/Kolkata" }
-    ));
+          if (!(await attempt(1))) {
+            logger.info("Retrying token refresh in 30s...");
+            await new Promise((r) => setTimeout(r, 30_000));
+            await attempt(2);
+          }
+        },
+        { timezone: "Asia/Kolkata" },
+      );
 
     // 2) Periodic preload of close prices (every 5 minutes)
-    cronTasks.push(cron.schedule("*/5 * * * *", async () => {
+    cron.schedule("*/5 * * * *", async () => {
       try {
         const syms = await redisService.getAllGlobalStocks();
         const BATCH_SIZE = 10;
@@ -275,39 +327,49 @@ mongoose
       } catch (err) {
         logger.error("Error in periodic preload", { error: err.message });
       }
-    }));
+    });
 
     // 3) Daily instrument update at 6:35 AM IST (5 min after token refresh to avoid resource contention)
-    cronTasks.push(cron.schedule(
+    cron.schedule(
       "35 6 * * *",
       async () => {
         try {
           logger.info("Starting scheduled daily instrument update...");
           const result = await updateInstruments();
-          logger.info(`Instrument update complete: ${result.count} instruments (deleted ${result.deleted} old)`);
+          logger.info(
+            `Instrument update complete: ${result.count} instruments (deleted ${result.deleted} old)`,
+          );
         } catch (err) {
-          logger.error("Scheduled instrument update failed", { error: err.message });
+          logger.error("Scheduled instrument update failed", {
+            error: err.message,
+          });
         }
       },
-      { timezone: "Asia/Kolkata" }
-    ));
+      { timezone: "Asia/Kolkata" },
+    );
 
     // 4) Redis stale-stock + memory cleanup (every 10 minutes) — critical for 500MB limit
-    cronTasks.push(cron.schedule("*/10 * * * *", async () => {
+    cron.schedule("*/10 * * * *", async () => {
       try {
         await redisService.cleanupStaleStocks();
         await redisService.deepCleanupRedisMemory();
       } catch (err) {
         logger.error("Error in deep Redis cleanup", { error: err.message });
       }
-    }));
+    });
 
-    logger.info("Cron jobs scheduled: token refresh, close price preload, instrument update, Redis cleanup");
+    logger.info(
+      "Cron jobs scheduled: token refresh, close price preload, instrument update, Redis cleanup",
+    );
 
     // Initialize services
     logger.info("Initializing Telegram Bot...");
     await telegramService.init();
 
+    // NOTE: emailWorker, alertService, and alertSubscriptionManager are required here
+    // (not at the top of the file) because they must start AFTER MongoDB is connected
+    // and other services are initialized. Hoisting them would cause them to run before
+    // the DB is ready.
     logger.info("Starting email worker...");
     require("./workers/emailWorker");
 
@@ -350,7 +412,10 @@ app.use((req, res) => {
 });
 
 app.use((err, req, res, _next) => {
-  logger.error("Global error handler", { error: err.message, stack: err.stack });
+  logger.error("Global error handler", {
+    error: err.message,
+    stack: err.stack,
+  });
   res.status(err.status || 500).json({
     msg: err.message || "Server error",
     error: process.env.NODE_ENV === "development" ? err.stack : undefined,
@@ -361,15 +426,17 @@ app.use((err, req, res, _next) => {
 // Graceful shutdown
 // --------------------------------------------------
 async function shutdown(signal) {
-  // Force exit after 10s if graceful shutdown hangs
+  // Force exit after 30s if graceful shutdown hangs
   const forceTimer = setTimeout(() => {
-    logger.error("Forced exit after 10s shutdown timeout");
+    logger.error("Forced exit after 30s shutdown timeout");
     process.exit(1);
-  }, 10_000);
+  }, 30_000);
   forceTimer.unref();
 
   try {
     logger.info(`${signal} received: closing server`);
+    // Close Socket.IO before HTTP server so in-flight WS connections drain cleanly
+    getIo()?.close();
     server.close(async () => {
       logger.info("HTTP server closed");
 
@@ -389,8 +456,6 @@ async function shutdown(signal) {
 
       // Close Bull queues (email + telegram only; alert queue no longer used)
       try {
-        const emailQueue = require("./queues/emailQueue");
-        const telegramQueue = require("./queues/telegramQueue");
         await Promise.allSettled([emailQueue.close(), telegramQueue.close()]);
         logger.info("Bull queues closed");
       } catch (e) {
@@ -398,6 +463,8 @@ async function shutdown(signal) {
       }
 
       // Stop alert services
+      // NOTE: alertSubscriptionManager and alertService are required here via the module
+      // cache (they were already loaded during startup) — this is safe and not a circular dep.
       try {
         const alertSubscriptionManager = require("./services/alertSubscriptionManager");
         alertSubscriptionManager.stop();
@@ -453,7 +520,12 @@ process.on("unhandledRejection", (reason) => {
     logger.warn("Suppressed Redis rejection during shutdown", { reason: msg });
     return;
   }
-  logger.error("Unhandled Rejection", { reason: msg });
+  logger.error("Unhandled Rejection — exiting", {
+    reason: msg,
+    stack: reason?.stack,
+  });
+  // Delay exit slightly to allow the logger to flush before the process dies
+  setTimeout(() => process.exit(1), 1000);
 });
 
 module.exports = { app, server };

@@ -77,6 +77,25 @@ async function updateInstruments() {
 
     console.log(`✅ Successfully inserted ${totalInserted} instruments into MongoDB`);
 
+    // Ensure indexes exist for fast search queries
+    try {
+      await collection.createIndex(
+        { trading_symbol: 1 },
+        { background: true }
+      );
+      await collection.createIndex(
+        { trading_symbol: "text", name: "text" },
+        { background: true, name: "instrument_text_search" }
+      );
+      await collection.createIndex(
+        { instrument_key: 1 },
+        { background: true }
+      );
+      console.log('✅ Instrument search indexes created');
+    } catch (indexErr) {
+      console.warn('⚠️ Could not create instrument indexes (non-critical):', indexErr.message);
+    }
+
     // Clear Redis cache entries (non-fatal if fails)
     try {
       const redisService = require('./redisService');

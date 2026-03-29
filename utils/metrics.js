@@ -83,4 +83,28 @@ function stop() {
 // Auto-start metrics collection on import
 start();
 
-module.exports = { inc, observe, gauge, start, stop };
+// Memory usage tracking
+let memoryInterval;
+function startMemoryTracking() {
+  memoryInterval = setInterval(() => {
+    const mem = process.memoryUsage();
+    module.exports.gauge('heap_used_mb', Math.round(mem.heapUsed / 1024 / 1024));
+    module.exports.gauge('rss_mb', Math.round(mem.rss / 1024 / 1024));
+  }, 30000);
+  memoryInterval.unref();
+}
+
+// Event loop lag tracking
+let lagInterval;
+function startEventLoopLagTracking() {
+  let lastCheck = Date.now();
+  lagInterval = setInterval(() => {
+    const now = Date.now();
+    const lag = now - lastCheck - 1000;
+    module.exports.gauge('event_loop_lag_ms', Math.max(0, lag));
+    lastCheck = now;
+  }, 1000);
+  lagInterval.unref();
+}
+
+module.exports = { inc, observe, gauge, start, stop, startMemoryTracking, startEventLoopLagTracking };

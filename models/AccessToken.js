@@ -21,4 +21,7 @@ const accessTokenSchema = new mongoose.Schema({
   }
 }, { timestamps: true });
 
+// TTL index: MongoDB will automatically delete expired tokens
+accessTokenSchema.index({ expires_at: 1 }, { expireAfterSeconds: 0 });
+
 module.exports = mongoose.model('AccessToken', accessTokenSchema);

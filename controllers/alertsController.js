@@ -15,7 +15,17 @@ const { refreshAlertCache } = require("../services/alertService");
  */
 exports.getAlerts = async (req, res) => {
   try {
-    const alerts = await Alert.find({ user: req.user.id }).sort({ created_at: -1 });
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50));
+    const statusFilter = req.query.status;
+
+    const filter = { user: req.user.id };
+    if (statusFilter) filter.status = statusFilter;
+
+    const [alerts, total] = await Promise.all([
+      Alert.find(filter).sort({ created_at: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+      Alert.countDocuments(filter),
+    ]);
 
     // Batch fetch close prices in one Redis round-trip
     const instrumentKeys = [...new Set(alerts.map((a) => a.instrument_key))];
@@ -34,13 +44,15 @@ exports.getAlerts = async (req, res) => {
       }
     }
 
-    const alertsWithCmp = alerts.map((alert) => {
-      const obj = alert.toObject();
-      obj.cmp = closePrices[alert.instrument_key]?.close ?? obj.cmp ?? null;
-      return obj;
-    });
+    const alertsWithCmp = alerts.map((alert) => ({
+      ...alert,
+      cmp: closePrices[alert.instrument_key]?.close ?? alert.cmp ?? null,
+    }));
 
-    res.json({ alerts: alertsWithCmp });
+    res.json({
+      alerts: alertsWithCmp,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    });
   } catch (err) {
     logger.error("Error fetching alerts", { error: err.message });
     res.status(500).json({ message: "Server error" });

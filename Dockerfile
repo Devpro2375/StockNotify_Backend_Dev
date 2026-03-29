@@ -34,4 +34,14 @@ COPY . .
 # Railway injects PORT at runtime
 ENV NODE_ENV=production
 
+# Add non-root user for security
+RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
+
+EXPOSE 5000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+  CMD curl -f http://localhost:5000/health || exit 1
+
+USER appuser
+
 CMD ["node", "app.js"]

@@ -21,8 +21,11 @@ const validate = (req, res, next) => {
   next();
 };
 
-// Fetch all alerts for current user
-router.get("/", auth, (req, res) => getAlerts(req, res));
+// Fetch all alerts for current user (short cache — alerts can change frequently)
+router.get("/", auth, (req, res) => {
+  res.set("Cache-Control", "private, no-cache");
+  return getAlerts(req, res);
+});
 
 // Add a new alert
 router.post(

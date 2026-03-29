@@ -7,9 +7,10 @@ const router = express.Router();
 const telegramService = require("../services/telegramService");
 const User = require("../models/User");
 const authMiddleware = require("../middlewares/authMiddleware");
+const asyncHandler = require("../utils/asyncHandler");
 
 // Webhook endpoint (production)
-router.post("/webhook", async (req, res) => {
+router.post("/webhook", asyncHandler(async (req, res) => {
   try {
     await telegramService.processUpdate(req.body);
     res.sendStatus(200);
@@ -17,10 +18,10 @@ router.post("/webhook", async (req, res) => {
     console.error("❌ Webhook error:", error);
     res.sendStatus(500);
   }
-});
+}));
 
 // Link Telegram account
-router.post("/link", authMiddleware, async (req, res) => {
+router.post("/link", authMiddleware, asyncHandler(async (req, res) => {
   try {
     const { chatId } = req.body;
     if (!chatId || String(chatId).trim() === "") {
@@ -86,10 +87,10 @@ router.post("/link", authMiddleware, async (req, res) => {
     console.error("❌ Link error:", error);
     res.status(500).json({ message: "Error linking Telegram account" });
   }
-});
+}));
 
 // Unlink Telegram account
-router.post("/unlink", authMiddleware, async (req, res) => {
+router.post("/unlink", authMiddleware, asyncHandler(async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
     if (!user.telegramChatId)
@@ -110,10 +111,10 @@ router.post("/unlink", authMiddleware, async (req, res) => {
     console.error("❌ Unlink error:", error);
     res.status(500).json({ message: "Error unlinking Telegram account" });
   }
-});
+}));
 
 // Get Telegram status
-router.get("/status", authMiddleware, async (req, res) => {
+router.get("/status", authMiddleware, asyncHandler(async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
     res.json({
@@ -126,10 +127,10 @@ router.get("/status", authMiddleware, async (req, res) => {
     console.error("❌ Status error:", error);
     res.status(500).json({ message: "Error fetching Telegram status" });
   }
-});
+}));
 
 // Toggle Telegram notifications
-router.post("/toggle", authMiddleware, async (req, res) => {
+router.post("/toggle", authMiddleware, asyncHandler(async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
     if (!user.telegramChatId)
@@ -148,10 +149,10 @@ router.post("/toggle", authMiddleware, async (req, res) => {
     console.error("❌ Toggle error:", error);
     res.status(500).json({ message: "Error toggling notifications" });
   }
-});
+}));
 
 // Test notification
-router.post("/test", authMiddleware, async (req, res) => {
+router.post("/test", authMiddleware, asyncHandler(async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
     if (!user.telegramChatId)
@@ -173,6 +174,6 @@ router.post("/test", authMiddleware, async (req, res) => {
     console.error("❌ Test error:", error);
     res.status(500).json({ message: "Error sending test notification" });
   }
-});
+}));
 
 module.exports = router;

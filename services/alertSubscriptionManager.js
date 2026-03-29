@@ -30,7 +30,7 @@ async function syncAlertSubscriptions() {
     const toRemove = currentPersistent.filter((s) => !needed.has(s));
 
     if (toAdd.length) {
-      await Promise.all(toAdd.map((sym) => redisService.addPersistentStock(sym)));
+      await redisService.addPersistentStockBatch(toAdd);
       upstoxService.subscribe(toAdd);
       logger.info(`Alert subscriptions: +${toAdd.length} stocks`, {
         sample: toAdd.slice(0, 5),

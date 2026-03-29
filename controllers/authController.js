@@ -29,7 +29,7 @@ exports.register = async (req, res) => {
 
   const { username, email, password } = req.body;
   try {
-    const existingUser = await User.findOne({ $or: [{ email }, { username }] });
+    const existingUser = await User.findOne({ $or: [{ email }, { username }] }).lean();
     if (existingUser) {
       if (existingUser.email === email)
         return res.status(400).json({ msg: "User already exists" });
@@ -283,7 +283,7 @@ exports.updateProfile = async (req, res) => {
     const userId = req.user.id;
 
     if (username && username !== req.user.username) {
-      const exists = await User.findOne({ username });
+      const exists = await User.findOne({ username }).lean();
       if (exists)
         return res.status(400).json({ msg: "Username already taken" });
     }

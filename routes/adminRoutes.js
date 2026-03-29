@@ -5,6 +5,7 @@ const AccessToken = require('../models/AccessToken');
 const axios = require('axios');
 const upstoxService = require('../services/upstoxService');
 const { updateInstruments } = require('../services/instrumentService');
+const asyncHandler = require("../utils/asyncHandler");
 
 // Middleware to check if admin is logged in
 const isAdminLoggedIn = (req, res, next) => {
@@ -96,9 +97,9 @@ router.post('/login', (req, res) => {
 });
 
 // GET /admin - Serve dashboard (protected)
-router.get('/', isAdminLoggedIn, async (req, res) => {
+router.get('/', isAdminLoggedIn, asyncHandler(async (req, res) => {
   try {
-    const tokenDoc = await AccessToken.findOne();
+    const tokenDoc = await AccessToken.findOne().lean();
     const currentToken = tokenDoc ? tokenDoc.token : '';
     const lastUpdated = tokenDoc ? new Date(tokenDoc.updatedAt).toLocaleString() : 'Never';
     res.send(`
@@ -219,10 +220,10 @@ router.get('/', isAdminLoggedIn, async (req, res) => {
     console.error('Error loading dashboard:', err);
     res.status(500).send('Error loading dashboard.');
   }
-});
+}));
 
 // POST /admin/update-token - Update token in DB and trigger reconnect
-router.post('/update-token', isAdminLoggedIn, async (req, res) => {
+router.post('/update-token', isAdminLoggedIn, asyncHandler(async (req, res) => {
   const { token } = req.body;
   try {
     await AccessToken.updateOne({}, { token, updatedAt: Date.now() }, { upsert: true });
@@ -233,10 +234,10 @@ router.post('/update-token', isAdminLoggedIn, async (req, res) => {
     console.error('Error updating token or reconnecting:', err);
     res.redirect(`/admin?error=Failed to update token or reconnect WS: ${err.message}`);
   }
-});
+}));
 
 // POST /admin/update-instruments - Update instruments database
-router.post('/update-instruments', isAdminLoggedIn, async (req, res) => {
+router.post('/update-instruments', isAdminLoggedIn, asyncHandler(async (req, res) => {
   try {
     console.log('🚀 Manual instrument update triggered by admin');
     const result = await updateInstruments();
@@ -247,12 +248,12 @@ router.post('/update-instruments', isAdminLoggedIn, async (req, res) => {
     console.error('❌ Update error:', error);
     res.redirect(`/admin?error=Update failed: ${error.message}`);
   }
-});
+}));
 
 // POST /admin/test-token - Test token validity
-router.post('/test-token', isAdminLoggedIn, async (req, res) => {
+router.post('/test-token', isAdminLoggedIn, asyncHandler(async (req, res) => {
   try {
-    const tokenDoc = await AccessToken.findOne();
+    const tokenDoc = await AccessToken.findOne().lean();
     if (!tokenDoc || !tokenDoc.token) {
       return res.json({ valid: false });
     }
@@ -265,7 +266,7 @@ router.post('/test-token', isAdminLoggedIn, async (req, res) => {
     console.error('Test token error:', err.response ? err.response.data : err.message);
     res.json({ valid: false });
   }
-});
+}));
 
 // GET /admin/ws-status - Get WebSocket status
 router.get('/ws-status', isAdminLoggedIn, (req, res) => {

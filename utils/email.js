@@ -137,7 +137,9 @@ exports.sendAlertEmailNow = async (userEmail, alertDetails) => {
 
   const calculatePnL = () => {
     if (status === 'slHit' || status === 'targetHit') {
-      const pnl = current_price - entry_price;
+      const pnl = position === 'short'
+        ? entry_price - current_price
+        : current_price - entry_price;
       const pnlPercent = ((pnl / entry_price) * 100);
       return { amount: pnl, percent: pnlPercent, isProfit: pnl > 0 };
     }

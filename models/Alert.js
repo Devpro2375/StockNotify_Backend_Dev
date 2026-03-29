@@ -7,9 +7,9 @@ const alertSchema = new mongoose.Schema({
   trading_symbol: { type: String, required: true },
   instrument_key: { type: String, required: true },
   cmp: { type: Number },
-  entry_price: { type: Number, required: true },
-  stop_loss: { type: Number, required: true },
-  target_price: { type: Number, required: true },
+  entry_price: { type: Number, required: true, min: 0.01 },
+  stop_loss: { type: Number, required: true, min: 0.01 },
+  target_price: { type: Number, required: true, min: 0.01 },
   position: { type: String, enum: ["long", "short"] },
   trade_type: {
     type: String,
@@ -36,5 +36,21 @@ alertSchema.index({ instrument_key: 1, status: 1 });
 alertSchema.index({ user: 1, status: 1 });
 // Cleanup queries: finds alerts by instrument_key for count checks
 alertSchema.index({ user: 1, instrument_key: 1, status: 1 });
+
+// ── Pre-validate: enforce stop_loss direction relative to entry_price ──
+alertSchema.pre('validate', function(next) {
+  if (this.entry_price && this.stop_loss && this.target_price) {
+    if (this.position === 'long') {
+      if (this.stop_loss >= this.entry_price) {
+        return next(new Error('Long trade: stop_loss must be below entry_price'));
+      }
+    } else if (this.position === 'short') {
+      if (this.stop_loss <= this.entry_price) {
+        return next(new Error('Short trade: stop_loss must be above entry_price'));
+      }
+    }
+  }
+  next();
+});
 
 module.exports = mongoose.model("Alert", alertSchema);

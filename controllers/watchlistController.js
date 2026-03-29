@@ -38,7 +38,7 @@ async function fetchClosePrices(instrumentKeys) {
 // ════════════════════════════════════════════════════════════════════════════
 exports.getAllWatchlists = async (req, res) => {
   try {
-    let watchlists = await Watchlist.find({ user: req.user.id }).sort({ order: 1 });
+    let watchlists = await Watchlist.find({ user: req.user.id }).sort({ order: 1 }).lean();
 
     // Auto-create default if none exists
     if (!watchlists.length || !watchlists.find((w) => w.type === "default")) {
@@ -58,7 +58,7 @@ exports.getAllWatchlists = async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════
 exports.getWatchlist = async (req, res) => {
   try {
-    const wl = await Watchlist.findOne({ _id: req.params.id, user: req.user.id });
+    const wl = await Watchlist.findOne({ _id: req.params.id, user: req.user.id }).lean();
     if (!wl) return res.status(404).json({ error: "Watchlist not found" });
 
     const instrumentKeys = wl.symbols.map((s) => s.instrument_key);
@@ -143,14 +143,17 @@ exports.deleteWatchlist = async (req, res) => {
     if (!wl) return res.status(404).json({ error: "Not found" });
     if (wl.type === "default") return res.status(400).json({ error: "Cannot delete default watchlist" });
 
-    // Unsubscribe symbols
-    for (const s of wl.symbols) {
-      await redisService.removeUserFromStock(req.user.id, s.instrument_key);
-      if (!(await redisService.shouldSubscribe(s.instrument_key))) {
-        upstoxService.unsubscribe([s.instrument_key]);
-        await redisService.removeStockFromGlobal(s.instrument_key);
-      }
-    }
+    // Unsubscribe symbols (parallel — avoids N+1 sequential Redis round-trips)
+    await Promise.allSettled(
+      wl.symbols.map(async (s) => {
+        await redisService.removeUserFromStock(req.user.id, s.instrument_key);
+        const shouldKeep = await redisService.shouldSubscribe(s.instrument_key);
+        if (!shouldKeep) {
+          upstoxService.unsubscribe([s.instrument_key]);
+          await redisService.removeStockFromGlobal(s.instrument_key);
+        }
+      })
+    );
 
     await Watchlist.deleteOne({ _id: wl._id });
     res.json({ success: true });

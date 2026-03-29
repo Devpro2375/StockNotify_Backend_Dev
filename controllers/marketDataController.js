@@ -58,12 +58,12 @@ exports.getQuotes = async (req, res) => {
     if (!instruments)
       return res.status(400).json({ error: "Instruments parameter required" });
 
-    const instrumentList = instruments
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const instrumentList = instruments.split(",").map(s => s.trim()).filter(Boolean);
     if (!instrumentList.length)
       return res.status(400).json({ error: "No instruments provided" });
+    if (instrumentList.length > 50) {
+      return res.status(400).json({ message: "Maximum 50 instruments per request" });
+    }
 
     let ticks = {};
     let closePrices = {};
@@ -127,7 +127,7 @@ exports.getQuotes = async (req, res) => {
       // 3) API fallback (lazy token load)
       try {
         if (!accessToken) {
-          const tokenDoc = await AccessToken.findOne().lean();
+          const tokenDoc = await AccessToken.findOne({}, { token: 1 }).lean();
           accessToken = tokenDoc?.token || null;
         }
         if (!accessToken) {

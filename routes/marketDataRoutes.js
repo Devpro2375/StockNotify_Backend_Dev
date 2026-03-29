@@ -10,6 +10,28 @@ const axios = require("axios");
 const config = require("../config/config");
 const AccessToken = require("../models/AccessToken");
 
+// ── In-memory cache for historical candles ──
+const histCache = new Map(); // key -> { data, expiry }
+const HIST_CACHE_TTL = 2 * 60_000; // 2 min
+const MAX_HIST_CACHE = 80;
+
+// ── Cached token (avoids a DB query per request) ──
+let _cachedToken = null;
+let _tokenExpiry = 0;
+const TOKEN_TTL = 5 * 60_000;
+
+async function getCachedToken() {
+  if (_cachedToken && Date.now() < _tokenExpiry) return _cachedToken;
+  const tokenDoc = await AccessToken.findOne({}, { token: 1 }).lean();
+  if (!tokenDoc?.token) return null;
+  _cachedToken = tokenDoc.token;
+  _tokenExpiry = Date.now() + TOKEN_TTL;
+  return _cachedToken;
+}
+
+// ── Request deduplication ──
+const inflightHist = new Map();
+
 // Quotes (existing)
 router.get("/quotes", authMiddleware, marketDataController.getQuotes);
 
@@ -28,59 +50,48 @@ router.get("/historical/:instrumentKey", authMiddleware, async (req, res) => {
         });
     }
 
-    const toDate = new Date();
-    const fromDate = new Date();
-    fromDate.setDate(toDate.getDate() - parseInt(days, 10));
+    const cacheKey = `mdhist:${instrumentKey}:${interval}:${days}`;
 
-    const to = toDate.toISOString().split("T")[0];
-    const from = fromDate.toISOString().split("T")[0];
+    // ── Check in-memory cache ──
+    const cached = histCache.get(cacheKey);
+    if (cached && Date.now() < cached.expiry) {
+      res.set("X-Cache", "HIT");
+      res.set("Cache-Control", "private, max-age=120");
+      return res.json(cached.data);
+    }
 
-    const tokenDoc = await AccessToken.findOne();
-    if (!tokenDoc?.token)
-      return res.status(401).json({ msg: "Access token not found" });
+    // ── Deduplicate concurrent identical requests ──
+    if (inflightHist.has(cacheKey)) {
+      const result = await inflightHist.get(cacheKey);
+      res.set("X-Cache", "DEDUP");
+      res.set("Cache-Control", "private, max-age=120");
+      return res.json(result);
+    }
 
-    console.log(
-      `📊 Fetching historical data: ${instrumentKey} | Interval: ${interval} | From: ${from} To: ${to}`
-    );
+    const promise = fetchHistorical(instrumentKey, interval, days);
+    inflightHist.set(cacheKey, promise);
 
-    const upstoxUrl = `${config.upstoxRestUrl}/v2/historical-candle/${instrumentKey}/${interval}/${to}/${from}`;
-    const response = await axios.get(upstoxUrl, {
-      headers: { Authorization: `Bearer ${tokenDoc.token}` },
-      timeout: 10000,
-    });
+    let result;
+    try {
+      result = await promise;
+    } finally {
+      inflightHist.delete(cacheKey);
+    }
 
-    const raw = response.data?.data?.candles || [];
-    const candles = raw
-      .map((candle) => {
-        const [ts, o, h, l, c, v] = candle || [];
-        if (ts == null) return null;
-        // v2 returns seconds; ensure ISO date
-        return {
-          time: new Date(Number(ts) * 1000).toISOString().split("T")[0],
-          open: Number(o),
-          high: Number(h),
-          low: Number(l),
-          close: Number(c),
-          volume: v ? Number(v) : 0,
-        };
-      })
-      .filter(Boolean)
-      .sort((a, b) => new Date(a.time) - new Date(b.time));
+    // Store in cache
+    histCache.set(cacheKey, { data: result, expiry: Date.now() + HIST_CACHE_TTL });
+    if (histCache.size > MAX_HIST_CACHE) {
+      const now = Date.now();
+      for (const [k, v] of histCache) {
+        if (v.expiry < now) histCache.delete(k);
+      }
+    }
 
-    console.log(`✅ Retrieved ${candles.length} candles for ${instrumentKey}`);
-
-    res.json({
-      candles,
-      metadata: {
-        instrument_key: instrumentKey,
-        interval,
-        from,
-        to,
-        count: candles.length,
-      },
-    });
+    res.set("X-Cache", "MISS");
+    res.set("Cache-Control", "private, max-age=120");
+    res.json(result);
   } catch (err) {
-    console.error("❌ Error fetching historical data:", err.message);
+    console.error("Error fetching historical data:", err.message);
 
     if (err.response?.status === 401)
       return res
@@ -100,5 +111,51 @@ router.get("/historical/:instrumentKey", authMiddleware, async (req, res) => {
     res.status(500).json({ msg: "Error fetching historical data" });
   }
 });
+
+async function fetchHistorical(instrumentKey, interval, days) {
+  const toDate = new Date();
+  const fromDate = new Date();
+  fromDate.setDate(toDate.getDate() - parseInt(days, 10));
+
+  const to = toDate.toISOString().split("T")[0];
+  const from = fromDate.toISOString().split("T")[0];
+
+  const token = await getCachedToken();
+  if (!token) throw Object.assign(new Error("Access token not found"), { response: { status: 401 } });
+
+  const upstoxUrl = `${config.upstoxRestUrl}/v2/historical-candle/${instrumentKey}/${interval}/${to}/${from}`;
+  const response = await axios.get(upstoxUrl, {
+    headers: { Authorization: `Bearer ${token}` },
+    timeout: 10000,
+  });
+
+  const raw = response.data?.data?.candles || [];
+  const candles = raw
+    .map((candle) => {
+      const [ts, o, h, l, c, v] = candle || [];
+      if (ts == null) return null;
+      return {
+        time: new Date(Number(ts) * 1000).toISOString().split("T")[0],
+        open: Number(o),
+        high: Number(h),
+        low: Number(l),
+        close: Number(c),
+        volume: v ? Number(v) : 0,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => new Date(a.time) - new Date(b.time));
+
+  return {
+    candles,
+    metadata: {
+      instrument_key: instrumentKey,
+      interval,
+      from,
+      to,
+      count: candles.length,
+    },
+  };
+}
 
 module.exports = router;

@@ -9,6 +9,10 @@ const logger = require("../utils/logger");
 
 const telegramQueue = new Bull("telegram-notifications", {
   redis: redisConfig,
+  limiter: {
+    max: 25,      // 25 per second (5 headroom under Telegram's 30/sec limit)
+    duration: 1000
+  },
   defaultJobOptions: {
     attempts: 3,
     backoff: { type: "exponential", delay: 2000 },
