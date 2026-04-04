@@ -35,7 +35,7 @@ router.post(
     body("stop_loss").isNumeric().withMessage("stop_loss must be a number"),
     body("target_price").isNumeric().withMessage("target_price must be a number"),
     body("position").isIn(["long", "short"]).withMessage("position must be long or short"),
-    body("trade_type").isIn(["intraday", "swing", "positional"]).withMessage("Invalid trade_type"),
+    body("trade_type").isIn(["QIT", "MIT", "WIT", "DIT", "HIT"]).withMessage("Invalid trade_type"),
   ],
   validate,
   (req, res) => addAlert(req, res)
