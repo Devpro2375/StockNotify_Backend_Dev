@@ -42,7 +42,10 @@ class TelegramService {
         try {
           await this.setupWebhook();
         } catch (webhookErr) {
-          console.warn("⚠️ Webhook setup failed, falling back to polling:", webhookErr.message);
+          console.warn(
+            "⚠️ Webhook setup failed, falling back to polling:",
+            webhookErr.message,
+          );
           await this.startPolling();
         }
       } else {
@@ -85,7 +88,9 @@ class TelegramService {
   async startPolling() {
     try {
       // Stop any existing polling first to avoid 409 conflict
-      try { await this.bot.stopPolling(); } catch {}
+      try {
+        await this.bot.stopPolling();
+      } catch {}
       await this.bot.deleteWebHook();
       await this.sleep(1000);
 
@@ -111,10 +116,14 @@ class TelegramService {
       // Suppress 409 spam — only log once then stop polling to let the other instance run
       if (error.code === "ETELEGRAM" && error.response?.statusCode === 409) {
         if (!this._conflict409Logged) {
-          console.error("⚠️ Telegram 409: Another bot instance running. Stopping polling.");
+          console.error(
+            "⚠️ Telegram 409: Another bot instance running. Stopping polling.",
+          );
           this._conflict409Logged = true;
         }
-        try { await this.bot.stopPolling(); } catch {}
+        try {
+          await this.bot.stopPolling();
+        } catch {}
         this.pollingActive = false;
         return;
       }
@@ -142,17 +151,17 @@ class TelegramService {
     });
 
     this.bot.on("error", (error) =>
-      console.error("❌ Telegram bot error:", error)
+      console.error("❌ Telegram bot error:", error),
     );
     this.bot.on("webhook_error", (error) =>
-      console.error("❌ Telegram webhook error:", error)
+      console.error("❌ Telegram webhook error:", error),
     );
   }
 
   async scheduleReconnect() {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       console.error(
-        "❌ Max reconnect attempts reached. Manual intervention needed."
+        "❌ Max reconnect attempts reached. Manual intervention needed.",
       );
       return;
     }
@@ -161,8 +170,9 @@ class TelegramService {
     const delay = Math.min(5000 * this.reconnectAttempts, 30000);
 
     console.log(
-      `🔄 Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts
-      })`
+      `🔄 Reconnecting in ${delay / 1000}s (attempt ${this.reconnectAttempts}/${
+        this.maxReconnectAttempts
+      })`,
     );
 
     await this.sleep(delay);
@@ -179,31 +189,34 @@ class TelegramService {
   startHealthCheck() {
     if (this.healthCheckInterval) clearInterval(this.healthCheckInterval);
 
-    this.healthCheckInterval = setInterval(async () => {
-      try {
-        if (!this.bot) {
-          console.warn("⚠️ Bot instance lost, reinitializing...");
-          await this.init();
-          return;
-        }
-        await this.bot.getMe();
-        console.log("✅ Telegram health check passed");
-      } catch (error) {
-        console.error("❌ Health check failed:", error.message);
+    this.healthCheckInterval = setInterval(
+      async () => {
+        try {
+          if (!this.bot) {
+            console.warn("⚠️ Bot instance lost, reinitializing...");
+            await this.init();
+            return;
+          }
+          await this.bot.getMe();
+          console.log("✅ Telegram health check passed");
+        } catch (error) {
+          console.error("❌ Health check failed:", error.message);
 
-        if (this.pollingActive) {
-          console.log("🔄 Restarting polling...");
-          try {
-            await this.bot.stopPolling();
-            await this.sleep(2000);
-            await this.startPolling();
-          } catch (restartError) {
-            console.error("❌ Restart failed:", restartError.message);
-            await this.scheduleReconnect();
+          if (this.pollingActive) {
+            console.log("🔄 Restarting polling...");
+            try {
+              await this.bot.stopPolling();
+              await this.sleep(2000);
+              await this.startPolling();
+            } catch (restartError) {
+              console.error("❌ Restart failed:", restartError.message);
+              await this.scheduleReconnect();
+            }
           }
         }
-      }
-    }, 5 * 60 * 1000);
+      },
+      5 * 60 * 1000,
+    );
   }
 
   setupCommands() {
@@ -285,7 +298,7 @@ Get instant stock alerts on Telegram.
           if (!user) {
             await this.bot.sendMessage(
               chatId,
-              "❌ Not linked. Use /start to get your Chat ID."
+              "❌ Not linked. Use /start to get your Chat ID.",
             );
             await this.bot.answerCallbackQuery(callbackQuery.id);
             return;
@@ -326,7 +339,7 @@ Get instant stock alerts on Telegram.
         if (!user) {
           await this.sendMessage(
             chatId,
-            "❌ Not linked. Use /start to get your Chat ID."
+            "❌ Not linked. Use /start to get your Chat ID.",
           );
           return;
         }
@@ -385,7 +398,7 @@ Get instant stock alerts on Telegram.
 
         await this.sendMessage(
           chatId,
-          "✅ Unlinked successfully. Use /start to reconnect."
+          "✅ Unlinked successfully. Use /start to reconnect.",
         );
       } catch (error) {
         console.error("❌ Unlink error:", error);
@@ -468,7 +481,7 @@ Get instant stock alerts on Telegram.
     } catch (error) {
       console.error(
         `❌ Telegram send failed for chat ${chatId}:`,
-        error.message
+        error.message,
       );
       return false;
     }
@@ -496,18 +509,18 @@ Get instant stock alerts on Telegram.
           console.warn(`⚠️ User blocked bot: ${chatId}`);
           await User.findOneAndUpdate(
             { telegramChatId: String(chatId) },
-            { telegramEnabled: false }
+            { telegramEnabled: false },
           );
           return false;
         }
 
         if (desc.includes("chat not found")) {
           console.error(
-            `❌ Chat not found: ${chatId}. User needs to /start bot first.`
+            `❌ Chat not found: ${chatId}. User needs to /start bot first.`,
           );
           await User.findOneAndUpdate(
             { telegramChatId: String(chatId) },
-            { telegramEnabled: false, telegramChatId: null }
+            { telegramEnabled: false, telegramChatId: null },
           );
           return false;
         }
@@ -523,7 +536,7 @@ Get instant stock alerts on Telegram.
 
         console.error(
           `❌ Telegram error (attempt ${attempt}/${retries}):`,
-          desc
+          desc,
         );
         if (attempt < retries) await this.sleep(2000 * attempt);
       }
@@ -566,11 +579,11 @@ Get instant stock alerts on Telegram.
 
     if (this.bot) {
       // Remove all event listeners to prevent duplicate handlers on re-init
-      this.bot.removeAllListeners('message');
-      this.bot.removeAllListeners('callback_query');
-      this.bot.removeAllListeners('polling_error');
-      this.bot.removeAllListeners('error');
-      this.bot.removeAllListeners('webhook_error');
+      this.bot.removeAllListeners("message");
+      this.bot.removeAllListeners("callback_query");
+      this.bot.removeAllListeners("polling_error");
+      this.bot.removeAllListeners("error");
+      this.bot.removeAllListeners("webhook_error");
       // Clear onText regex handlers
       this.bot._textRegexpCallbacks = [];
     }

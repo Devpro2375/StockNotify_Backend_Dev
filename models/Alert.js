@@ -13,7 +13,7 @@ const alertSchema = new mongoose.Schema({
   position: { type: String, enum: ["long", "short"] },
   trade_type: {
     type: String,
-    enum: ["intraday", "swing", "positional"],
+    enum: ["QIT", "MIT", "WIT", "DIT", "HIT"],
     required: true,
   },
   level: { type: String, enum: ["4", "5", "6", "7"], required: true },

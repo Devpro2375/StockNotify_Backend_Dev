@@ -127,21 +127,57 @@ function init(server) {
     }
 
     // Historical data on demand
-    socket.on("request-history", async ({ instrumentKey, interval }) => {
-      const roomName = `history:${instrumentKey}:${interval}`;
+    socket.on("request-history", async ({ instrumentKey, interval, days, fullHistory, requestId } = {}) => {
+      const normalizedDays =
+        days === undefined ||
+        fullHistory === true ||
+        String(fullHistory || "").toLowerCase() === "true" ||
+        String(fullHistory || "") === "1" ||
+        String(days || "").toLowerCase() === "all"
+          ? undefined
+          : Number(days);
+      const useFullHistory =
+        fullHistory === true ||
+        String(fullHistory || "").toLowerCase() === "true" ||
+        String(fullHistory || "") === "1" ||
+        String(days || "").toLowerCase() === "all";
+      const rangeKey = useFullHistory
+        ? "full"
+        : Number.isFinite(normalizedDays) && normalizedDays > 0
+        ? `d${normalizedDays}`
+        : "default";
+      const roomName = `history:${instrumentKey}:${interval}:${rangeKey}`;
+
+      if (days !== undefined && !useFullHistory && (!Number.isFinite(normalizedDays) || normalizedDays < 1)) {
+        socket.emit("history-error", {
+          requestId: requestId || "",
+          instrumentKey,
+          interval,
+          error: "days must be a positive number or 'all'",
+        });
+        return;
+      }
+
       try {
         socket.join(roomName);
-        const candles = await historyService.cacheHistoricalData(instrumentKey, interval);
+        const candles = await historyService.cacheHistoricalData(instrumentKey, interval, {
+          days: normalizedDays,
+          fullHistory: useFullHistory,
+        });
         socket.emit("history-data", {
+          requestId: requestId || "",
           instrumentKey,
           interval,
           candles,
           timestamp: Date.now(),
           cached: true,
+          requestedDays: normalizedDays ?? null,
+          fullHistory: useFullHistory,
         });
       } catch (err) {
         logger.error("History error", { instrumentKey, error: err.message });
         socket.emit("history-error", {
+          requestId: requestId || "",
           instrumentKey,
           interval,
           error: err.message,
