@@ -3,20 +3,21 @@
 const axios = require('axios');
 const { gunzipSync } = require('zlib');
 const mongoose = require('mongoose');
+const logger = require('../utils/logger');
+
+// Only NSE and BSE equity + index segments
+const ALLOWED_SEGMENTS = new Set(['NSE_EQ', 'BSE_EQ', 'NSE_INDEX', 'BSE_INDEX']);
 
 async function updateInstruments() {
   try {
-    console.log('📥 Downloading instruments from Upstox...');
+    logger.info('Instrument update: downloading NSE + BSE (EQ + INDEX only)');
 
-    const exchanges = ['NSE', 'BSE', 'NFO', 'MCX', 'BFO', 'CDS'];
+    const exchanges = ['NSE', 'BSE'];
     let allInstruments = [];
 
     for (const exchange of exchanges) {
       try {
         const url = `https://assets.upstox.com/market-quote/instruments/exchange/${exchange}.json.gz`;
-        console.log(`📡 Fetching ${exchange}...`);
-
-        // Download gzipped JSON; disable auto-decompress to manually gunzip
         const response = await axios.get(url, {
           responseType: 'arraybuffer',
           timeout: 30000,
@@ -24,28 +25,29 @@ async function updateInstruments() {
           decompress: false,
         });
 
-        console.log(`📦 Decompressing ${exchange}...`);
         const decompressed = gunzipSync(Buffer.from(response.data));
         const instruments = JSON.parse(decompressed.toString('utf-8'));
 
-        const normalized = instruments.map((inst) => ({
-          ...inst,
-          trading_symbol: String(inst.trading_symbol || '').toUpperCase(),
-        }));
+        const filtered = instruments
+          .filter((inst) => ALLOWED_SEGMENTS.has(inst.segment))
+          .map((inst) => ({
+            trading_symbol: String(inst.trading_symbol || '').toUpperCase(),
+            instrument_key: String(inst.instrument_key || ''),
+            exchange: String(inst.exchange || ''),
+            segment: String(inst.segment || ''),
+            instrument_type: String(inst.instrument_type || ''),
+            name: String(inst.name || ''),
+          }));
 
-        allInstruments = allInstruments.concat(normalized);
-        console.log(`✅ Downloaded ${instruments.length} instruments from ${exchange}`);
+        allInstruments = allInstruments.concat(filtered);
+        logger.info(`Instrument update: ${exchange} ${instruments.length} total → ${filtered.length} kept`);
       } catch (error) {
-        console.error(`❌ Failed to download ${exchange}:`, error.message);
-        // continue with other exchanges
+        logger.error(`Instrument update: failed to download ${exchange}`, { error: error.message });
       }
     }
 
     if (!allInstruments.length) throw new Error('No instruments downloaded from any exchange');
 
-    console.log(`💾 Updating MongoDB with ${allInstruments.length} total instruments...`);
-
-    // Ensure Mongo is connected
     if (!mongoose.connection || mongoose.connection.readyState !== 1) {
       throw new Error('MongoDB not connected');
     }
@@ -54,36 +56,41 @@ async function updateInstruments() {
     const collectionName = process.env.INSTRUMENTS_COLLECTION || 'instruments';
     const collection = db.collection(collectionName);
 
-    console.log(`🗑️ Clearing existing instruments from ${collectionName}...`);
     const deleteResult = await collection.deleteMany({});
-    console.log(`✅ Deleted ${deleteResult.deletedCount} old instruments`);
+    // Drop all non-_id indexes so stale/renamed indexes don't accumulate
+    await collection.dropIndexes();
 
-    // Batch insert for performance
     const batchSize = 1000;
     let totalInserted = 0;
-
     for (let i = 0; i < allInstruments.length; i += batchSize) {
       const batch = allInstruments.slice(i, i + batchSize);
       try {
         await collection.insertMany(batch, { ordered: false });
         totalInserted += batch.length;
-        console.log(
-          `✅ Inserted batch ${Math.floor(i / batchSize) + 1}: ${totalInserted}/${allInstruments.length}`
-        );
       } catch (error) {
-        console.error(`❌ Error inserting batch at position ${i}:`, error.message);
+        logger.error(`Instrument update: batch insert error at ${i}`, { error: error.message });
       }
     }
 
-    console.log(`✅ Successfully inserted ${totalInserted} instruments into MongoDB`);
+    // Rebuild indexes after insert (dropIndexes above cleared old ones)
+    await Promise.all([
+      collection.createIndex({ trading_symbol: 1 }, { name: 'ts_asc' }),
+      collection.createIndex({ segment: 1 }, { name: 'segment_asc' }),
+      collection.createIndex({ trading_symbol: 1, segment: 1 }, { name: 'ts_segment' }),
+      collection.createIndex({ name: 1 }, { name: 'name_asc' }),
+    ]);
 
-    // Clear Redis cache entries (non-fatal if fails)
+    // Clear all search-related Redis cache (non-fatal)
     try {
       const redisService = require('./redisService');
-      const cleared = await redisService.deleteKeysByPattern('instrument:*');
-      console.log(`🗑️ Cleared ${cleared} instrument cache entries from Redis`);
+      await Promise.all([
+        redisService.deleteKeysByPattern('search:*'),
+        redisService.deleteKeysByPattern('chart-search:*'),
+        redisService.deleteKeysByPattern('instrument:*'),
+      ]);
+      logger.info('Instrument update: Redis search cache cleared');
     } catch (redisError) {
-      console.warn('⚠️ Could not clear Redis cache (non-critical):', redisError.message);
+      logger.warn('Instrument update: Redis cache clear failed (non-critical)', { error: redisError.message });
     }
 
     return {
@@ -92,7 +99,7 @@ async function updateInstruments() {
       deleted: deleteResult.deletedCount,
     };
   } catch (error) {
-    console.error('❌ Instrument update failed:', error);
+    logger.error('Instrument update failed', { error: error.message });
     throw error;
   }
 }
