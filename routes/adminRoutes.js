@@ -145,7 +145,7 @@ router.get('/', isAdminLoggedIn, async (req, res) => {
             
             <button onclick="testConnection(true)">Test Connection</button>
             
-            <form method="POST" action="/admin/update-instruments" style="margin: 0;" onsubmit="return confirm('This will download and update all instruments from Upstox exchanges (NSE, BSE, NFO, MCX, BFO, CDS). This may take 1-2 minutes. Continue?');">
+            <form method="POST" action="/admin/update-instruments" style="margin: 0;" onsubmit="return confirm('This will download NSE + BSE equity & index instruments and update the database. Takes ~30 seconds. Continue?');">
               <button type="submit" class="btn-secondary">🔄 Update Instruments Database</button>
             </form>
             
@@ -238,13 +238,13 @@ router.post('/update-token', isAdminLoggedIn, async (req, res) => {
 // POST /admin/update-instruments - Update instruments database
 router.post('/update-instruments', isAdminLoggedIn, async (req, res) => {
   try {
-    console.log('🚀 Manual instrument update triggered by admin');
+    const logger = require('../utils/logger');
+    logger.info('Manual instrument update triggered by admin');
     const result = await updateInstruments();
-    
-    // Redirect back to admin dashboard with success message
-    res.redirect(`/admin?success=Updated ${result.count} instruments successfully! (Deleted ${result.deleted} old records)`);
+    res.redirect(`/admin?success=Updated ${result.count} instruments (NSE+BSE EQ+INDEX). Deleted ${result.deleted} old records.`);
   } catch (error) {
-    console.error('❌ Update error:', error);
+    const logger = require('../utils/logger');
+    logger.error('Manual instrument update failed', { error: error.message });
     res.redirect(`/admin?error=Update failed: ${error.message}`);
   }
 });
