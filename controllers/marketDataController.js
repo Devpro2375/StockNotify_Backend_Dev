@@ -48,6 +48,33 @@ function parseV2FullQuote(response, instrument) {
   };
 }
 
+function extractTickLtp(tick) {
+  return (
+    tick?.fullFeed?.marketFF?.ltpc?.ltp ??
+    tick?.fullFeed?.indexFF?.ltpc?.ltp ??
+    tick?.ltpc?.ltp ??
+    tick?.firstLevelWithGreeks?.ltpc?.ltp ??
+    null
+  );
+}
+
+function extractTickOhlc(tick, ltp) {
+  const ohlcList =
+    tick?.fullFeed?.marketFF?.marketOHLC?.ohlc ??
+    tick?.fullFeed?.indexFF?.marketOHLC?.ohlc ??
+    [];
+  const dayCandle = Array.isArray(ohlcList)
+    ? ohlcList.find((c) => c?.interval === "1d") || ohlcList[0]
+    : null;
+
+  return {
+    open: Number(dayCandle?.open ?? ltp),
+    high: Number(dayCandle?.high ?? ltp),
+    low: Number(dayCandle?.low ?? ltp),
+    close: Number(ltp),
+  };
+}
+
 /**
  * GET /api/market-data/quotes
  * REFACTORED: Batch tick + close lookups, single token fetch for API fallback.
@@ -88,20 +115,12 @@ exports.getQuotes = async (req, res) => {
       // 1) Real-time tick
       const lastTick = ticks[instrument];
       if (lastTick) {
-        const ltp =
-          lastTick?.fullFeed?.marketFF?.ltpc?.ltp ??
-          lastTick?.fullFeed?.indexFF?.ltpc?.ltp ??
-          null;
+        const ltp = extractTickLtp(lastTick);
 
         if (ltp != null) {
           quotes[instrument] = {
-            last_price: ltp,
-            ohlc: {
-              open: lastTick?.fullFeed?.marketFF?.marketOHLC?.ohlc?.open ?? ltp,
-              high: lastTick?.fullFeed?.marketFF?.marketOHLC?.ohlc?.high ?? ltp,
-              low: lastTick?.fullFeed?.marketFF?.marketOHLC?.ohlc?.low ?? ltp,
-              close: ltp,
-            },
+            last_price: Number(ltp),
+            ohlc: extractTickOhlc(lastTick, ltp),
             source: "realtime",
           };
           continue;

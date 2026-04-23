@@ -227,7 +227,7 @@ router.post('/update-token', isAdminLoggedIn, async (req, res) => {
   try {
     await AccessToken.updateOne({}, { token, updatedAt: Date.now() }, { upsert: true });
     // Trigger reconnect and wait for it
-    await upstoxService.connect();
+    await upstoxService.reconnect();
     res.redirect('/admin?success=Token updated and WS reconnected successfully!');
   } catch (err) {
     console.error('Error updating token or reconnecting:', err);

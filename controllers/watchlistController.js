@@ -6,6 +6,16 @@ const redisService = require("../services/redisService");
 const upstoxService = require("../services/upstoxService");
 const logger = require("../utils/logger");
 
+function extractTickLtp(tick) {
+  return (
+    tick?.fullFeed?.marketFF?.ltpc?.ltp ??
+    tick?.fullFeed?.indexFF?.ltpc?.ltp ??
+    tick?.ltpc?.ltp ??
+    tick?.firstLevelWithGreeks?.ltpc?.ltp ??
+    null
+  );
+}
+
 // ── Helper: get or create default watchlist ──
 async function getDefaultWatchlist(userId) {
   let wl = await Watchlist.findOne({ user: userId, type: "default" });
@@ -18,8 +28,23 @@ async function getDefaultWatchlist(userId) {
 
 // ── Helper: batch fetch close prices ──
 async function fetchClosePrices(instrumentKeys) {
-  const closePrices = await redisService.getLastClosePriceBatch(instrumentKeys);
-  const missing = instrumentKeys.filter((k) => !closePrices[k]);
+  const [ticks, closePrices] = await Promise.all([
+    redisService.getLastTickBatch(instrumentKeys),
+    redisService.getLastClosePriceBatch(instrumentKeys),
+  ]);
+
+  for (const key of instrumentKeys) {
+    const tickLtp = extractTickLtp(ticks[key]);
+    if (tickLtp != null) {
+      closePrices[key] = {
+        ...(closePrices[key] || {}),
+        close: Number(tickLtp),
+        source: "realtime",
+      };
+    }
+  }
+
+  const missing = instrumentKeys.filter((k) => extractTickLtp(ticks[k]) == null && !closePrices[k]);
   if (missing.length) {
     const fetched = await Promise.allSettled(
       missing.map((k) => upstoxService.fetchLastClose(k))
