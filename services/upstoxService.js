@@ -269,14 +269,15 @@ async function checkFeedHealth() {
   if (!isLikelyIndianMarketSession()) return;
 
   const now = Date.now();
-  const referenceAt = Math.max(lastTickAt || 0, lastSubscriptionAt || 0, connectedAt || 0);
+  // Subscription replays are recovery attempts, not proof that market data is flowing.
+  // Base staleness on the last valid LTP tick so an open-but-silent socket reconnects.
+  const referenceAt = lastTickAt || connectedAt || 0;
   if (!referenceAt) return;
 
   const staleForMs = now - referenceAt;
   metrics.gauge("ws_last_tick_age_ms", staleForMs);
 
   if (staleForMs < FEED_STALE_MS) {
-    staleRecoveryAttempts = 0;
     return;
   }
   if (now - lastStaleActionAt < FEED_STALE_ACTION_COOLDOWN_MS) return;
