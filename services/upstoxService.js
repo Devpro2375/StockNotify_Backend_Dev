@@ -53,6 +53,8 @@ const SUBSCRIPTION_BATCH_SIZE = Number(process.env.UPSTOX_WS_SUBSCRIPTION_BATCH_
 const FEED_HEALTH_CHECK_MS = Number(process.env.UPSTOX_WS_HEALTH_CHECK_MS || 30_000);
 const FEED_STALE_MS = Number(process.env.UPSTOX_WS_STALE_MS || 90_000);
 const FEED_STALE_ACTION_COOLDOWN_MS = Number(process.env.UPSTOX_WS_STALE_ACTION_COOLDOWN_MS || 60_000);
+const LTP_FALLBACK_POLL_MS = Number(process.env.UPSTOX_LTP_FALLBACK_POLL_MS || 10_000);
+const LTP_FALLBACK_BATCH_SIZE = Number(process.env.UPSTOX_LTP_FALLBACK_BATCH_SIZE || 50);
 
 // ── LTP dedup for Socket.IO broadcast ──
 // Prevents emitting identical ticks to rooms when price hasn't changed
@@ -67,6 +69,10 @@ let lastStaleActionAt = 0;
 let staleRecoveryAttempts = 0;
 let reconnectTimer = null;
 let feedHealthTimer = null;
+let ltpFallbackTimer = null;
+let ltpFallbackInFlight = false;
+let lastFallbackQuoteAt = 0;
+let lastFallbackLogAt = 0;
 
 // ── Failed symbol cooldown cache ──
 // Tracks symbols that fail fetchLastClose repeatedly. Skips them for 30 min.
@@ -209,6 +215,114 @@ function extractLtp(tick) {
   );
 }
 
+function annotateTick(tick, source, receivedAt = Date.now()) {
+  if (tick && typeof tick === "object") {
+    tick.__source = source;
+    tick.__receivedAt = receivedAt;
+  }
+  return tick;
+}
+
+function findQuotePayload(data, instrumentKey) {
+  if (!data || typeof data !== "object") return null;
+  if (data[instrumentKey]) return data[instrumentKey];
+
+  return Object.values(data).find((quote) => {
+    const token = quote?.instrument_token || quote?.instrumentToken;
+    return token === instrumentKey;
+  }) || null;
+}
+
+function buildFallbackOhlc(price, closePrice = price) {
+  return {
+    open: closePrice,
+    high: price,
+    low: price,
+    close: price,
+  };
+}
+
+function normalizeQuotePayload(payload) {
+  if (!payload) return null;
+
+  const price = Number(payload.last_price ?? payload.lastPrice ?? payload.ltp);
+  if (!Number.isFinite(price)) return null;
+
+  const closePrice = Number(payload.cp ?? payload.close ?? price);
+  return {
+    last_price: price,
+    ohlc: buildFallbackOhlc(price, Number.isFinite(closePrice) ? closePrice : price),
+    ltq: payload.ltq ?? null,
+    volume: payload.volume ?? null,
+    cp: Number.isFinite(closePrice) ? closePrice : null,
+    source: "upstox_ltp_v3",
+  };
+}
+
+function buildLtpTick(quote, receivedAt = Date.now()) {
+  const ltp = Number(quote.last_price);
+  const cp = Number.isFinite(Number(quote.cp)) ? Number(quote.cp) : ltp;
+  const ltpc = {
+    ltp,
+    cp,
+    ...(quote.ltq != null ? { ltq: Number(quote.ltq) } : {}),
+    ltt: receivedAt,
+  };
+
+  return annotateTick(
+    {
+      ltpc,
+      fullFeed: {
+        marketFF: {
+          ltpc,
+        },
+      },
+    },
+    quote.source || "upstox_ltp_v3",
+    receivedAt
+  );
+}
+
+async function fetchLtpQuotes(instruments) {
+  const instrumentList = normalizeSymbols(instruments);
+  const quotes = {};
+  if (!instrumentList.length) return quotes;
+
+  const accessToken = await getAccessTokenFromDB();
+  const baseUrl = config.upstoxRestUrl || "https://api.upstox.com";
+
+  for (const batch of chunkSymbolsWithSize(instrumentList, LTP_FALLBACK_BATCH_SIZE)) {
+    const url = `${baseUrl}/v3/market-quote/ltp?instrument_key=${batch
+      .map((instrument) => encodeURIComponent(instrument))
+      .join(",")}`;
+
+    try {
+      const response = await axios.get(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        timeout: 5000,
+      });
+
+      const data = response.data?.data || {};
+      for (const instrument of batch) {
+        const quote = normalizeQuotePayload(findQuotePayload(data, instrument));
+        if (quote) quotes[instrument] = quote;
+      }
+    } catch (err) {
+      logger.warn("Upstox LTP fallback batch failed", {
+        count: batch.length,
+        status: err.response?.status,
+        error: err.message,
+      });
+    }
+  }
+
+  return quotes;
+}
+
 let connecting = false;
 
 function normalizeSymbols(symbols) {
@@ -217,9 +331,14 @@ function normalizeSymbols(symbols) {
 }
 
 function chunkSymbols(symbols) {
+  return chunkSymbolsWithSize(symbols, SUBSCRIPTION_BATCH_SIZE);
+}
+
+function chunkSymbolsWithSize(symbols, size) {
   const chunks = [];
-  for (let i = 0; i < symbols.length; i += SUBSCRIPTION_BATCH_SIZE) {
-    chunks.push(symbols.slice(i, i + SUBSCRIPTION_BATCH_SIZE));
+  const chunkSize = Math.max(1, Number(size) || SUBSCRIPTION_BATCH_SIZE);
+  for (let i = 0; i < symbols.length; i += chunkSize) {
+    chunks.push(symbols.slice(i, i + chunkSize));
   }
   return chunks;
 }
@@ -259,9 +378,14 @@ function isLikelyIndianMarketSession(date = new Date()) {
 }
 
 function startFeedHealthMonitor() {
-  if (feedHealthTimer) return;
-  feedHealthTimer = setInterval(checkFeedHealth, FEED_HEALTH_CHECK_MS);
-  feedHealthTimer.unref();
+  if (!feedHealthTimer) {
+    feedHealthTimer = setInterval(checkFeedHealth, FEED_HEALTH_CHECK_MS);
+    feedHealthTimer.unref();
+  }
+  if (!ltpFallbackTimer) {
+    ltpFallbackTimer = setInterval(pollLtpFallbackIfStale, LTP_FALLBACK_POLL_MS);
+    ltpFallbackTimer.unref();
+  }
 }
 
 async function checkFeedHealth() {
@@ -271,7 +395,7 @@ async function checkFeedHealth() {
   const now = Date.now();
   // Subscription replays are recovery attempts, not proof that market data is flowing.
   // Base staleness on the last valid LTP tick so an open-but-silent socket reconnects.
-  const referenceAt = lastTickAt || connectedAt || 0;
+  const referenceAt = getFeedReferenceAt();
   if (!referenceAt) return;
 
   const staleForMs = now - referenceAt;
@@ -303,6 +427,75 @@ async function checkFeedHealth() {
     batches: Math.ceil(subscribedSymbols.length / SUBSCRIPTION_BATCH_SIZE),
   });
   sendSubscription("sub", subscribedSymbols);
+}
+
+function getFeedReferenceAt() {
+  return lastTickAt || connectedAt || 0;
+}
+
+function isFeedStale(now = Date.now()) {
+  const referenceAt = getFeedReferenceAt();
+  return Boolean(referenceAt && now - referenceAt >= FEED_STALE_MS);
+}
+
+async function pollLtpFallbackIfStale() {
+  if (ltpFallbackInFlight) return;
+  if (!isWsOpen() || desiredSubscriptions.size === 0) return;
+  if (!isLikelyIndianMarketSession()) return;
+  if (!isFeedStale()) return;
+
+  ltpFallbackInFlight = true;
+  const symbols = [...desiredSubscriptions];
+  const startedAt = Date.now();
+
+  try {
+    const quotes = await fetchLtpQuotes(symbols);
+    const io = ioInstance.getIo();
+    let publishedCount = 0;
+
+    for (const symbol of symbols) {
+      const quote = quotes[symbol];
+      if (!quote) continue;
+
+      const ltpNum = Number(quote.last_price);
+      if (!Number.isFinite(ltpNum)) continue;
+
+      const receivedAt = Date.now();
+      const tick = buildLtpTick(quote, receivedAt);
+      redisService.setLastTick(symbol, tick);
+
+      if (io && lastBroadcastLtp.get(symbol) !== ltpNum) {
+        lastBroadcastLtp.set(symbol, ltpNum);
+        io.in(symbol).emit("tick", { symbol, tick });
+      }
+
+      setImmediate(() => {
+        getAlertService().processTickAlerts(symbol, ltpNum).catch((err) =>
+          logger.error("Alert processing error", { symbol, error: err.message })
+        );
+      });
+
+      publishedCount += 1;
+    }
+
+    if (publishedCount) {
+      const completedAt = Date.now();
+      lastFallbackQuoteAt = completedAt;
+      metrics.inc("ltp_fallback_ticks", publishedCount);
+      metrics.observe("ltp_fallback_latency_ms", completedAt - startedAt);
+      if (completedAt - lastFallbackLogAt >= 60_000) {
+        lastFallbackLogAt = completedAt;
+        logger.warn("Published LTP fallback ticks while Upstox WS feed is stale", {
+          count: publishedCount,
+          subscribedCount: symbols.length,
+        });
+      }
+    }
+  } catch (err) {
+    logger.warn("LTP fallback polling failed", { error: err.message });
+  } finally {
+    ltpFallbackInFlight = false;
+  }
 }
 
 async function connect() {
@@ -357,7 +550,8 @@ async function connect() {
     ws.on("message", (buffer) => {
       try {
         if (!buffer) return;
-        lastMessageAt = Date.now();
+        const receivedAt = Date.now();
+        lastMessageAt = receivedAt;
         metrics.inc("ws_messages_received");
         const decoded = FeedResponse.decode(buffer);
         const feeds = decoded?.feeds;
@@ -371,7 +565,7 @@ async function connect() {
 
         for (let i = 0; i < symbols.length; i++) {
           const symbol = symbols[i];
-          const tick = feeds[symbol];
+          const tick = annotateTick(feeds[symbol], "upstox_ws", receivedAt);
 
           // Extract LTP once
           const ltp = extractLtp(tick);
@@ -381,7 +575,7 @@ async function connect() {
           // 1) Buffer tick for Redis (synchronous, non-blocking)
           redisService.setLastTick(symbol, tick);
           if (hasValidLtp) {
-            lastTickAt = Date.now();
+            lastTickAt = receivedAt;
             staleRecoveryAttempts = 0;
           }
 
@@ -494,7 +688,9 @@ function getWsStatus() {
     lastMessageAt: lastMessageAt ? new Date(lastMessageAt).toISOString() : null,
     lastTickAt: lastTickAt ? new Date(lastTickAt).toISOString() : null,
     lastSubscriptionAt: lastSubscriptionAt ? new Date(lastSubscriptionAt).toISOString() : null,
+    lastFallbackQuoteAt: lastFallbackQuoteAt ? new Date(lastFallbackQuoteAt).toISOString() : null,
     lastTickAgeMs: lastTickAt ? now - lastTickAt : null,
+    lastFallbackQuoteAgeMs: lastFallbackQuoteAt ? now - lastFallbackQuoteAt : null,
     reconnectAttempts,
     connecting,
   };
@@ -543,6 +739,7 @@ module.exports = {
   subscribe,
   unsubscribe,
   fetchLastClose,
+  fetchLtpQuotes,
   connect,
   getWsStatus,
   reconnect,

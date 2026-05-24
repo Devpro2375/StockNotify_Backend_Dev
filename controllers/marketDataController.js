@@ -8,6 +8,8 @@ const config = require("../config/config");
 const upstoxService = require("../services/upstoxService");
 const logger = require("../utils/logger");
 
+const QUOTE_TICK_MAX_AGE_MS = Number(process.env.QUOTE_TICK_MAX_AGE_MS || 60_000);
+
 function buildFallbackOhlc(price, closePrice = price) {
   return {
     open: closePrice,
@@ -18,7 +20,13 @@ function buildFallbackOhlc(price, closePrice = price) {
 }
 
 function parseV3LtpQuote(response, instrument) {
-  const data = response?.data?.data?.[instrument];
+  const responseData = response?.data?.data || {};
+  const data =
+    responseData[instrument] ||
+    Object.values(responseData).find((quote) => {
+      const token = quote?.instrument_token || quote?.instrumentToken;
+      return token === instrument;
+    });
   if (data?.last_price == null) {
     return null;
   }
@@ -34,7 +42,13 @@ function parseV3LtpQuote(response, instrument) {
 }
 
 function parseV2FullQuote(response, instrument) {
-  const data = response?.data?.data?.[instrument];
+  const responseData = response?.data?.data || {};
+  const data =
+    responseData[instrument] ||
+    Object.values(responseData).find((quote) => {
+      const token = quote?.instrument_token || quote?.instrumentToken;
+      return token === instrument;
+    });
   if (data?.last_price == null) {
     return null;
   }
@@ -75,6 +89,16 @@ function extractTickOhlc(tick, ltp) {
   };
 }
 
+function getTickReceivedAt(tick) {
+  const receivedAt = Number(tick?.__receivedAt ?? tick?.receivedAt);
+  return Number.isFinite(receivedAt) && receivedAt > 0 ? receivedAt : null;
+}
+
+function isFreshTick(tick) {
+  const receivedAt = getTickReceivedAt(tick);
+  return Boolean(receivedAt && Date.now() - receivedAt <= QUOTE_TICK_MAX_AGE_MS);
+}
+
 /**
  * GET /api/market-data/quotes
  * REFACTORED: Batch tick + close lookups, single token fetch for API fallback.
@@ -107,106 +131,104 @@ exports.getQuotes = async (req, res) => {
       });
     }
 
-    // Lazy-load token only if needed for API fallback
-    let accessToken = null;
-
     const quotes = {};
+    const needsApiQuote = [];
+
     for (const instrument of instrumentList) {
-      // 1) Real-time tick
       const lastTick = ticks[instrument];
-      if (lastTick) {
-        const ltp = extractTickLtp(lastTick);
+      const ltp = extractTickLtp(lastTick);
 
-        if (ltp != null) {
-          quotes[instrument] = {
-            last_price: Number(ltp),
-            ohlc: extractTickOhlc(lastTick, ltp),
-            source: "realtime",
-          };
-          continue;
-        }
-      }
-
-      // 2) Close price cache
-      const lastClose = closePrices[instrument];
-      if (lastClose) {
+      if (ltp != null && isFreshTick(lastTick)) {
         quotes[instrument] = {
-          last_price: lastClose.close,
-          ohlc: {
-            open: lastClose.open,
-            high: lastClose.high,
-            low: lastClose.low,
-            close: lastClose.close,
-          },
-          source: "historical",
+          last_price: Number(ltp),
+          ohlc: extractTickOhlc(lastTick, ltp),
+          source: "realtime",
         };
         continue;
       }
 
-      // 3) API fallback (lazy token load)
+      needsApiQuote.push(instrument);
+    }
+
+    let apiQuotes = {};
+    if (needsApiQuote.length) {
+      try {
+        apiQuotes = await upstoxService.fetchLtpQuotes(needsApiQuote);
+      } catch (error) {
+        logger.warn("Batch LTP quote fallback failed", {
+          status: error.response?.status,
+          error: error.message,
+        });
+      }
+    }
+
+    // Lazy-load token only if needed for the older v2 fallback path.
+    let accessToken = null;
+
+    for (const instrument of instrumentList) {
+      if (quotes[instrument]) continue;
+
+      const apiQuote = apiQuotes[instrument];
+      if (apiQuote) {
+        quotes[instrument] = apiQuote;
+        continue;
+      }
+
+      let resolvedQuote = null;
+
       try {
         if (!accessToken) {
           const tokenDoc = await AccessToken.findOne().lean();
           accessToken = tokenDoc?.token || null;
         }
-        if (!accessToken) {
-          quotes[instrument] = null;
-          continue;
-        }
 
-        const baseUrl = config.upstoxRestUrl || "https://api.upstox.com";
-        const quoteAttempts = [
-          {
-            label: "v3_ltp",
-            url: `${baseUrl}/v3/market-quote/ltp?instrument_key=${encodeURIComponent(instrument)}`,
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-              Accept: "application/json",
-            },
-            parse: parseV3LtpQuote,
-          },
-          {
-            label: "v2_full_quote",
-            url: `${baseUrl}/v2/market-quote/quotes?instrument_key=${encodeURIComponent(instrument)}`,
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-              Accept: "application/json",
-              "Api-Version": "2.0",
-            },
-            parse: parseV2FullQuote,
-          },
-        ];
-
-        let resolvedQuote = null;
-
-        for (const attempt of quoteAttempts) {
+        if (accessToken) {
+          const baseUrl = config.upstoxRestUrl || "https://api.upstox.com";
           try {
-            const response = await axios.get(attempt.url, {
-              headers: attempt.headers,
-              timeout: 5000,
-            });
-            resolvedQuote = attempt.parse(response, instrument);
-            if (resolvedQuote) {
-              break;
-            }
+            const response = await axios.get(
+              `${baseUrl}/v2/market-quote/quotes?instrument_key=${encodeURIComponent(instrument)}`,
+              {
+                headers: {
+                  Authorization: `Bearer ${accessToken}`,
+                  Accept: "application/json",
+                  "Api-Version": "2.0",
+                },
+                timeout: 5000,
+              }
+            );
+            resolvedQuote = parseV2FullQuote(response, instrument);
           } catch (attemptError) {
-            logger.warn(`Quote fallback ${attempt.label} failed for ${instrument}`, {
+            logger.warn(`Quote fallback v2_full_quote failed for ${instrument}`, {
               status: attemptError.response?.status,
               error: attemptError.message,
             });
           }
         }
 
+        const lastClose = closePrices[instrument];
+        if (!resolvedQuote && lastClose) {
+          resolvedQuote = {
+            last_price: lastClose.close,
+            ohlc: {
+              open: lastClose.open,
+              high: lastClose.high,
+              low: lastClose.low,
+              close: lastClose.close,
+            },
+            source: "historical",
+          };
+        }
+
         if (!resolvedQuote) {
-          const lastClose = await upstoxService.fetchLastClose(instrument);
-          if (lastClose?.close != null) {
+          const fetchedClose = await upstoxService.fetchLastClose(instrument);
+          if (fetchedClose?.close != null) {
             resolvedQuote = {
-              last_price: Number(lastClose.close),
+              last_price: Number(fetchedClose.close),
               ohlc: {
-                open: Number(lastClose.open ?? lastClose.close),
-                high: Number(lastClose.high ?? lastClose.close),
-                low: Number(lastClose.low ?? lastClose.close),
-                close: Number(lastClose.close),
+                open: Number(fetchedClose.open ?? fetchedClose.close),
+                high: Number(fetchedClose.high ?? fetchedClose.close),
+                low: Number(fetchedClose.low ?? fetchedClose.close),
+                close: Number(fetchedClose.close),
               },
               source: "historical_fallback",
             };

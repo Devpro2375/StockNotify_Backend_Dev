@@ -302,7 +302,7 @@ async function fetchHistoricalChunks(instrumentKey, spec, token, startDate, endD
 }
 
 async function fetchIntradayOverlay(instrumentKey, spec, token) {
-  if (!spec.includeIntraday || !isNSEOpen()) {
+  if (!spec.includeIntraday) {
     return [];
   }
 
