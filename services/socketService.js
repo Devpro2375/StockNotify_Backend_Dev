@@ -127,7 +127,7 @@ function init(server) {
     }
 
     // Historical data on demand
-    socket.on("request-history", async ({ instrumentKey, interval, days, fullHistory, requestId } = {}) => {
+    socket.on("request-history", async ({ instrumentKey, interval, days, fullHistory, from, to, includeIntraday, requestId } = {}) => {
       const normalizedDays =
         days === undefined ||
         fullHistory === true ||
@@ -141,7 +141,9 @@ function init(server) {
         String(fullHistory || "").toLowerCase() === "true" ||
         String(fullHistory || "") === "1" ||
         String(days || "").toLowerCase() === "all";
-      const rangeKey = useFullHistory
+      const rangeKey = from || to
+        ? `r${from || "start"}_${to || "today"}_${includeIntraday === false ? "no-live" : "live"}`
+        : useFullHistory
         ? "full"
         : Number.isFinite(normalizedDays) && normalizedDays > 0
         ? `d${normalizedDays}`
@@ -157,12 +159,27 @@ function init(server) {
         });
         return;
       }
+      if (
+        (from && !/^\d{4}-\d{2}-\d{2}$/.test(String(from))) ||
+        (to && !/^\d{4}-\d{2}-\d{2}$/.test(String(to)))
+      ) {
+        socket.emit("history-error", {
+          requestId: requestId || "",
+          instrumentKey,
+          interval,
+          error: "from/to must use YYYY-MM-DD format",
+        });
+        return;
+      }
 
       try {
         socket.join(roomName);
         const candles = await historyService.cacheHistoricalData(instrumentKey, interval, {
           days: normalizedDays,
           fullHistory: useFullHistory,
+          from: typeof from === "string" ? from : undefined,
+          to: typeof to === "string" ? to : undefined,
+          includeIntraday: includeIntraday === false ? false : true,
         });
         socket.emit("history-data", {
           requestId: requestId || "",
@@ -188,7 +205,12 @@ function init(server) {
     });
 
     socket.on("leave-history", ({ instrumentKey, interval }) => {
-      socket.leave(`history:${instrumentKey}:${interval}`);
+      const prefix = `history:${instrumentKey}:${interval}`;
+      for (const room of socket.rooms) {
+        if (room === prefix || room.startsWith(`${prefix}:`)) {
+          socket.leave(room);
+        }
+      }
     });
 
     // Add stock subscription on demand

@@ -41,6 +41,16 @@ const legacyIntervalMap = {
   "125minute": "125",
 };
 
+function parseBooleanFlag(value, defaultValue = false) {
+  if (value === undefined) return defaultValue;
+  const normalized = String(value).toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+function isDateKey(value) {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
 router.get("/quotes", authMiddleware, marketDataController.getQuotes);
 
 router.get("/historical/:instrumentKey", authMiddleware, async (req, res) => {
@@ -48,6 +58,9 @@ router.get("/historical/:instrumentKey", authMiddleware, async (req, res) => {
     const { instrumentKey } = req.params;
     const rawInterval = String(req.query.interval || "day");
     const rawDays = req.query.days;
+    const from = typeof req.query.from === "string" ? req.query.from : undefined;
+    const to = typeof req.query.to === "string" ? req.query.to : undefined;
+    const includeIntraday = parseBooleanFlag(req.query.includeIntraday, true);
     const fullHistory =
       String(req.query.fullHistory || "").toLowerCase() === "true" ||
       String(req.query.fullHistory || "") === "1" ||
@@ -61,10 +74,16 @@ router.get("/historical/:instrumentKey", authMiddleware, async (req, res) => {
     if (rawDays !== undefined && !fullHistory && (!Number.isFinite(days) || days < 1)) {
       return res.status(400).json({ msg: "days must be a positive number or 'all'" });
     }
+    if ((from && !isDateKey(from)) || (to && !isDateKey(to))) {
+      return res.status(400).json({ msg: "from/to must use YYYY-MM-DD format" });
+    }
 
     const candles = await historyService.cacheHistoricalData(instrumentKey, interval, {
       days,
       fullHistory,
+      from,
+      to,
+      includeIntraday,
     });
 
     return res.json({
@@ -74,6 +93,8 @@ router.get("/historical/:instrumentKey", authMiddleware, async (req, res) => {
         interval,
         count: candles.length,
         requested_days: days ?? null,
+        from: from ?? null,
+        to: to ?? null,
         full_history: fullHistory,
       },
     });

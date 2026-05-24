@@ -65,6 +65,10 @@ function parseDate(value) {
   return new Date(Date.UTC(year, (month || 1) - 1, day || 1));
 }
 
+function isValidDate(value) {
+  return value instanceof Date && Number.isFinite(value.getTime());
+}
+
 function addDays(date, days) {
   const next = new Date(date.getTime());
   next.setUTCDate(next.getUTCDate() + days);
@@ -395,10 +399,32 @@ function aggregateCandles(candles, interval) {
   );
 }
 
-function resolveRange(interval, requestedDays, fullHistory = false) {
+function resolveRange(interval, requestedDays, fullHistory = false, explicitRange = {}) {
   const spec = getIntervalSpec(interval);
   const today = getTodayIstDate();
   const minimumDate = parseDate(spec.historyStart);
+
+  if (explicitRange.from || explicitRange.to) {
+    const requestedStart = explicitRange.from ? parseDate(explicitRange.from) : minimumDate;
+    const requestedEnd = explicitRange.to ? parseDate(explicitRange.to) : today;
+
+    if (!isValidDate(requestedStart) || !isValidDate(requestedEnd)) {
+      throw new Error("from/to must be valid dates in YYYY-MM-DD format");
+    }
+
+    let startDate = maxDate(requestedStart, minimumDate);
+    const endDate = minDate(requestedEnd, today);
+
+    if (startDate.getTime() > endDate.getTime()) {
+      throw new Error("from date must be before or equal to to date");
+    }
+
+    if (spec.kind === "derived") {
+      startDate = alignDerivedStartDate(startDate, interval);
+    }
+
+    return { startDate, endDate };
+  }
 
   if (fullHistory || !Number.isFinite(requestedDays) || requestedDays <= 0) {
     return { startDate: minimumDate, endDate: today };
@@ -418,11 +444,15 @@ function resolveRange(interval, requestedDays, fullHistory = false) {
 async function fetchCandlesForInterval(instrumentKey, interval, token, options = {}) {
   const fullHistory =
     Boolean(options.fullHistory) ||
-    !Number.isFinite(options.days) ||
+    (!options.from && !options.to && !Number.isFinite(options.days)) ||
     options.days >= FULL_HISTORY_DAYS;
 
-  const { startDate, endDate } = resolveRange(interval, options.days, fullHistory);
+  const { startDate, endDate } = resolveRange(interval, options.days, fullHistory, {
+    from: options.from,
+    to: options.to,
+  });
   const spec = getIntervalSpec(interval);
+  const includeIntraday = options.includeIntraday !== false;
 
   if (spec.kind === "derived") {
     const sourceSpec = getIntervalSpec(spec.sourceInterval);
@@ -437,9 +467,14 @@ async function fetchCandlesForInterval(instrumentKey, interval, token, options =
     return aggregateCandles(monthlyCandles, interval);
   }
 
+  const shouldFetchIntradayOverlay =
+    includeIntraday &&
+    spec.includeIntraday &&
+    endDate.getTime() >= getTodayIstDate().getTime();
+
   const [historicalCandles, intradayCandles] = await Promise.all([
     fetchHistoricalChunks(instrumentKey, spec, token, startDate, endDate),
-    fetchIntradayOverlay(instrumentKey, spec, token),
+    shouldFetchIntradayOverlay ? fetchIntradayOverlay(instrumentKey, spec, token) : Promise.resolve([]),
   ]);
 
   return dedupeCandles([...historicalCandles, ...intradayCandles]);
@@ -448,6 +483,13 @@ async function fetchCandlesForInterval(instrumentKey, interval, token, options =
 function getRangeKey(options = {}) {
   if (options.fullHistory) {
     return "full";
+  }
+
+  if (options.from || options.to) {
+    const from = options.from || "start";
+    const to = options.to || "today";
+    const overlay = options.includeIntraday === false ? "no-live" : "live";
+    return `r${from}_${to}_${overlay}`;
   }
 
   if (Number.isFinite(options.days) && options.days > 0) {
@@ -498,6 +540,9 @@ async function cacheHistoricalData(instrumentKey, interval, options = {}) {
         ? Number(options.days)
         : undefined,
     fullHistory: Boolean(options.fullHistory),
+    from: typeof options.from === "string" && options.from ? options.from : undefined,
+    to: typeof options.to === "string" && options.to ? options.to : undefined,
+    includeIntraday: options.includeIntraday === false ? false : true,
   };
   const rangeKey = getRangeKey(normalizedOptions);
   const cacheKey = `history:${instrumentKey}:${interval}:${rangeKey}`;
