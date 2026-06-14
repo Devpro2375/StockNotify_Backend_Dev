@@ -4,17 +4,8 @@
 const Watchlist = require("../models/Watchlist");
 const redisService = require("../services/redisService");
 const upstoxService = require("../services/upstoxService");
+const { resolveClosePrices } = require("../services/priceResolver");
 const logger = require("../utils/logger");
-
-function extractTickLtp(tick) {
-  return (
-    tick?.fullFeed?.marketFF?.ltpc?.ltp ??
-    tick?.fullFeed?.indexFF?.ltpc?.ltp ??
-    tick?.ltpc?.ltp ??
-    tick?.firstLevelWithGreeks?.ltpc?.ltp ??
-    null
-  );
-}
 
 // ── Helper: get or create default watchlist ──
 async function getDefaultWatchlist(userId) {
@@ -27,36 +18,6 @@ async function getDefaultWatchlist(userId) {
 }
 
 // ── Helper: batch fetch close prices ──
-async function fetchClosePrices(instrumentKeys) {
-  const [ticks, closePrices] = await Promise.all([
-    redisService.getLastTickBatch(instrumentKeys),
-    redisService.getLastClosePriceBatch(instrumentKeys),
-  ]);
-
-  for (const key of instrumentKeys) {
-    const tickLtp = extractTickLtp(ticks[key]);
-    if (tickLtp != null) {
-      closePrices[key] = {
-        ...(closePrices[key] || {}),
-        close: Number(tickLtp),
-        source: "realtime",
-      };
-    }
-  }
-
-  const missing = instrumentKeys.filter((k) => extractTickLtp(ticks[k]) == null && !closePrices[k]);
-  if (missing.length) {
-    const fetched = await Promise.allSettled(
-      missing.map((k) => upstoxService.fetchLastClose(k))
-    );
-    for (let i = 0; i < missing.length; i++) {
-      if (fetched[i].status === "fulfilled" && fetched[i].value) {
-        closePrices[missing[i]] = fetched[i].value;
-      }
-    }
-  }
-  return closePrices;
-}
 
 // ════════════════════════════════════════════════════════════════════════════
 // GET /api/watchlist — returns ALL watchlists for user
@@ -87,7 +48,7 @@ exports.getWatchlist = async (req, res) => {
     if (!wl) return res.status(404).json({ error: "Watchlist not found" });
 
     const instrumentKeys = wl.symbols.map((s) => s.instrument_key);
-    const closePrices = await fetchClosePrices(instrumentKeys);
+    const closePrices = await resolveClosePrices(instrumentKeys);
 
     res.json({ symbols: wl.symbols, prices: closePrices });
   } catch (err) {
@@ -103,7 +64,7 @@ exports.getDefaultWatchlist = async (req, res) => {
   try {
     const wl = await getDefaultWatchlist(req.user.id);
     const instrumentKeys = wl.symbols.map((s) => s.instrument_key);
-    const closePrices = await fetchClosePrices(instrumentKeys);
+    const closePrices = await resolveClosePrices(instrumentKeys);
     res.json({ symbols: wl.symbols, prices: closePrices });
   } catch (err) {
     logger.error("Error in getDefaultWatchlist", { error: err.message });
@@ -297,7 +258,7 @@ exports.getLtpSnapshot = async (req, res) => {
     return res.status(400).json({ error: "symbols array required" });
 
   try {
-    const closePrices = await fetchClosePrices(symbols);
+    const closePrices = await resolveClosePrices(symbols);
     const prices = {};
     for (const symbol of symbols) {
       prices[symbol] = closePrices[symbol]?.close ?? null;

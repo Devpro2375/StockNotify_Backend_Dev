@@ -4,6 +4,7 @@
 const express = require('express');
 const router = express.Router();
 const historyService = require('../services/historyService');
+const authMiddleware = require('../middlewares/authMiddleware');
 
 const allowedIntervals = new Set([
   "1",
@@ -31,8 +32,9 @@ function isDateKey(value) {
   return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
 
-// GET historical data (REST endpoint)
-router.get('/historical/:instrumentKey', async (req, res) => {
+// Backward-compatible historical endpoint. Canonical path is
+// /api/market-data/historical/:instrumentKey, but this alias must still be auth-protected.
+router.get('/historical/:instrumentKey', authMiddleware, async (req, res) => {
   try {
     const { instrumentKey } = req.params;
     const interval = String(req.query.interval || 'day');

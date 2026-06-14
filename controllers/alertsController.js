@@ -4,53 +4,26 @@
 const Alert = require("../models/Alert");
 const redisService = require("../services/redisService");
 const upstoxService = require("../services/upstoxService");
+const { resolveClosePrices } = require("../services/priceResolver");
 const { STATUSES } = require("../services/constants");
 const logger = require("../utils/logger");
 const { refreshAlertCache } = require("../services/alertService");
 
-function extractTickLtp(tick) {
-  return (
-    tick?.fullFeed?.marketFF?.ltpc?.ltp ??
-    tick?.fullFeed?.indexFF?.ltpc?.ltp ??
-    tick?.ltpc?.ltp ??
-    tick?.firstLevelWithGreeks?.ltpc?.ltp ??
-    null
-  );
-}
-
 /**
  * GET /api/alerts
  * Return all alerts for authenticated user, with `cmp` hydrated from cache/API.
- * REFACTORED: Uses batch Redis lookup instead of N sequential calls.
+ * Uses shared price resolver for Redis tick/close + provider fallback.
  */
 exports.getAlerts = async (req, res) => {
   try {
     const alerts = await Alert.find({ user: req.user.id }).sort({ created_at: -1 });
 
-    // Batch fetch live ticks + close prices in two Redis round-trips
     const instrumentKeys = [...new Set(alerts.map((a) => a.instrument_key))];
-    const [ticks, closePrices] = await Promise.all([
-      redisService.getLastTickBatch(instrumentKeys),
-      redisService.getLastClosePriceBatch(instrumentKeys),
-    ]);
-
-    // For any missing prices, fetch from API in parallel
-    const missing = instrumentKeys.filter((k) => extractTickLtp(ticks[k]) == null && !closePrices[k]);
-    if (missing.length) {
-      const fetched = await Promise.allSettled(
-        missing.map((k) => upstoxService.fetchLastClose(k))
-      );
-      for (let i = 0; i < missing.length; i++) {
-        if (fetched[i].status === "fulfilled" && fetched[i].value) {
-          closePrices[missing[i]] = fetched[i].value;
-        }
-      }
-    }
+    const closePrices = await resolveClosePrices(instrumentKeys);
 
     const alertsWithCmp = alerts.map((alert) => {
       const obj = alert.toObject();
-      const tickLtp = extractTickLtp(ticks[alert.instrument_key]);
-      obj.cmp = tickLtp ?? closePrices[alert.instrument_key]?.close ?? obj.cmp ?? null;
+      obj.cmp = closePrices[alert.instrument_key]?.close ?? obj.cmp ?? null;
       return obj;
     });
 
