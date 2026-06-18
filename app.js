@@ -284,7 +284,7 @@ mongoose
         try {
           logger.info("Starting scheduled daily instrument update...");
           const result = await updateInstruments();
-          logger.info(`Instrument update complete: ${result.count} instruments (deleted ${result.deleted} old)`);
+          logger.info(`Instrument update complete: ${result.count} instruments (deleted ${result.deleted} stale)`);
         } catch (err) {
           logger.error("Scheduled instrument update failed", { error: err.message });
         }

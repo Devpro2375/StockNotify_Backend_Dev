@@ -241,7 +241,7 @@ router.post('/update-instruments', isAdminLoggedIn, async (req, res) => {
     const logger = require('../utils/logger');
     logger.info('Manual instrument update triggered by admin');
     const result = await updateInstruments();
-    res.redirect(`/admin?success=Updated ${result.count} instruments (NSE+BSE EQ+INDEX). Deleted ${result.deleted} old records.`);
+    res.redirect(`/admin?success=Updated ${result.count} instruments (NSE+BSE EQ+INDEX). Deleted ${result.deleted} stale records.`);
   } catch (error) {
     const logger = require('../utils/logger');
     logger.error('Manual instrument update failed', { error: error.message });

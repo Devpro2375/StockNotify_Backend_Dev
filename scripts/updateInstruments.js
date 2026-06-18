@@ -14,7 +14,9 @@ async function run() {
     console.log('MongoDB connected');
 
     const result = await updateInstruments();
-    console.log(`Done. Inserted: ${result.count}, Deleted: ${result.deleted}`);
+    console.log(
+      `Done. Collection: ${result.collection}, Instruments: ${result.count}, Written: ${result.written}, Deleted stale: ${result.deleted}`
+    );
   } catch (err) {
     console.error('Failed:', err.message);
     process.exit(1);
