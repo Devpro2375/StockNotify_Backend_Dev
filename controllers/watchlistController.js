@@ -17,8 +17,6 @@ async function getDefaultWatchlist(userId) {
   return wl;
 }
 
-// ── Helper: batch fetch close prices ──
-
 // ════════════════════════════════════════════════════════════════════════════
 // GET /api/watchlist — returns ALL watchlists for user
 // ════════════════════════════════════════════════════════════════════════════
@@ -129,12 +127,14 @@ exports.deleteWatchlist = async (req, res) => {
     if (!wl) return res.status(404).json({ error: "Not found" });
     if (wl.type === "default") return res.status(400).json({ error: "Cannot delete default watchlist" });
 
-    // Unsubscribe symbols
-    for (const s of wl.symbols) {
-      await redisService.removeUserFromStock(req.user.id, s.instrument_key);
-      if (!(await redisService.shouldSubscribe(s.instrument_key))) {
-        upstoxService.unsubscribe([s.instrument_key]);
-        await redisService.removeStockFromGlobal(s.instrument_key);
+    const symbols = wl.symbols.map((s) => s.instrument_key).filter(Boolean);
+    if (symbols.length) {
+      await redisService.removeUserFromStocks(req.user.id, symbols);
+      const stillSubscribable = new Set(await redisService.filterSubscribable(symbols));
+      const toUnsubscribe = symbols.filter((symbol) => !stillSubscribable.has(symbol));
+      if (toUnsubscribe.length) {
+        upstoxService.unsubscribe(toUnsubscribe);
+        await redisService.removeStocksFromGlobal(toUnsubscribe);
       }
     }
 

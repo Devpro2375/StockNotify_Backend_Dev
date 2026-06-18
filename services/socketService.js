@@ -96,17 +96,12 @@ function init(server) {
         }
       }
 
-      // Batch register new symbols in Redis (pipeline inside addUserToStock)
+      // Batch register new symbols in Redis with a single pipeline
       if (newSymbols.length) {
-        await Promise.all(
-          newSymbols.map((sym) => redisService.addUserToStock(userId, sym))
-        );
+        await redisService.addUserToStocks(userId, newSymbols);
 
-        // Batch check which need Upstox subscription
-        const counts = await Promise.all(
-          newSymbols.map((sym) => redisService.getStockUserCount(sym))
-        );
-        const toSubscribe = newSymbols.filter((_, i) => counts[i] === 1);
+        const counts = await redisService.getStockUserCounts(newSymbols);
+        const toSubscribe = newSymbols.filter((sym) => counts[sym] === 1);
         if (toSubscribe.length) {
           upstoxService.subscribe(toSubscribe);
         }
@@ -217,9 +212,10 @@ function init(server) {
     socket.on("addStock", async (symbol) => {
       try {
         socket.join(symbol);
-        await redisService.addUserToStock(userId, symbol);
+        await redisService.addUserToStocks(userId, [symbol]);
 
-        if ((await redisService.getStockUserCount(symbol)) === 1) {
+        const counts = await redisService.getStockUserCounts([symbol]);
+        if (counts[symbol] === 1) {
           upstoxService.subscribe([symbol]);
 
           if (!(await redisService.getLastTick(symbol))) {
@@ -248,7 +244,7 @@ function init(server) {
     socket.on("removeStock", async (symbol) => {
       try {
         socket.leave(symbol);
-        await redisService.removeUserFromStock(userId, symbol);
+        await redisService.removeUserFromStocks(userId, [symbol]);
 
         if (!(await redisService.shouldSubscribe(symbol))) {
           upstoxService.unsubscribe([symbol]);

@@ -137,32 +137,85 @@ async function getLastClosePriceBatch(symbols) {
 
 // ── User-Stock associations ──
 
+function normalizeSymbols(symbols) {
+  const list = Array.isArray(symbols) ? symbols : [symbols];
+  return [...new Set(list.map((sym) => String(sym || "").trim()).filter(Boolean))];
+}
+
 async function addUserToStock(userId, symbol) {
+  return addUserToStocks(userId, [symbol]);
+}
+
+async function addUserToStocks(userId, symbols) {
+  const normalized = normalizeSymbols(symbols);
+  if (!normalized.length) return 0;
+
   const userIdStr = String(userId);
   const pipeline = client.pipeline();
-  pipeline.sadd(`stock:${symbol}:users`, userIdStr);
-  pipeline.sadd("global:stocks", symbol);
-  pipeline.sadd(`user:${userIdStr}:stocks`, symbol);
+  pipeline.sadd(`user:${userIdStr}:stocks`, ...normalized);
+  pipeline.sadd("global:stocks", ...normalized);
+  for (const symbol of normalized) {
+    pipeline.sadd(`stock:${symbol}:users`, userIdStr);
+  }
   await pipeline.exec();
+  return normalized.length;
 }
 
 async function removeUserFromStock(userId, symbol) {
+  return removeUserFromStocks(userId, [symbol]);
+}
+
+async function removeUserFromStocks(userId, symbols) {
+  const normalized = normalizeSymbols(symbols);
+  if (!normalized.length) return 0;
+
   const userIdStr = String(userId);
   const pipeline = client.pipeline();
-  pipeline.srem(`stock:${symbol}:users`, userIdStr);
-  pipeline.srem(`user:${userIdStr}:stocks`, symbol);
+  pipeline.srem(`user:${userIdStr}:stocks`, ...normalized);
+  for (const symbol of normalized) {
+    pipeline.srem(`stock:${symbol}:users`, userIdStr);
+  }
   await pipeline.exec();
+  return normalized.length;
 }
 
 async function getStockUserCount(symbol) {
   return client.scard(`stock:${symbol}:users`);
 }
 
-async function removeStockFromGlobal(symbol) {
+async function getStockUserCounts(symbols) {
+  const normalized = normalizeSymbols(symbols);
+  if (!normalized.length) return {};
+
   const pipeline = client.pipeline();
-  pipeline.srem("global:stocks", symbol);
-  pipeline.del(`stock:${symbol}:users`);
+  for (const symbol of normalized) {
+    pipeline.scard(`stock:${symbol}:users`);
+  }
+  const results = await pipeline.exec();
+
+  const counts = {};
+  for (let i = 0; i < normalized.length; i++) {
+    const [err, count] = results[i];
+    counts[normalized[i]] = err ? 0 : count;
+  }
+  return counts;
+}
+
+async function removeStockFromGlobal(symbol) {
+  return removeStocksFromGlobal([symbol]);
+}
+
+async function removeStocksFromGlobal(symbols) {
+  const normalized = normalizeSymbols(symbols);
+  if (!normalized.length) return 0;
+
+  const pipeline = client.pipeline();
+  pipeline.srem("global:stocks", ...normalized);
+  for (const symbol of normalized) {
+    pipeline.del(`stock:${symbol}:users`);
+  }
   await pipeline.exec();
+  return normalized.length;
 }
 
 async function getUserStocks(userId) {
@@ -427,9 +480,13 @@ module.exports = {
   quit,
   flushAndQuit,
   addUserToStock,
+  addUserToStocks,
   removeUserFromStock,
+  removeUserFromStocks,
   getStockUserCount,
+  getStockUserCounts,
   removeStockFromGlobal,
+  removeStocksFromGlobal,
   getUserStocks,
   getAllGlobalStocks,
   getStockUsers,
